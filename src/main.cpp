@@ -1,7 +1,9 @@
+#include "acoustic/audio_device.hpp"
 #include "acoustic/crc32.hpp"
 #include "acoustic/fsk.hpp"
 #include "acoustic/framing.hpp"
 #include "acoustic/packet.hpp"
+#include "acoustic/sha256.hpp"
 #include "acoustic/transfer.hpp"
 #include "acoustic/wav.hpp"
 
@@ -11,6 +13,7 @@
 #include <iomanip>
 #include <iostream>
 #include <stdexcept>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -23,8 +26,8 @@ void print_help() {
         << "  acoustic-transfer encode <input> <output.wav>\n"
         << "  acoustic-transfer decode <input.wav> <output>\n"
         << "  acoustic-transfer self-test\n"
-        << "  acoustic-transfer send <input>          (planned)\n"
-        << "  acoustic-transfer receive <output-dir>  (planned)\n";
+        << "  acoustic-transfer send <input>\n"
+        << "  acoustic-transfer receive <output-dir> [seconds]\n";
 }
 
 std::vector<std::uint8_t> read_file(const std::filesystem::path& path) {
@@ -53,14 +56,15 @@ void print_crc(std::span<const std::uint8_t> data) {
 
 int encode(const std::filesystem::path& input, const std::filesystem::path& output) {
     const auto data = read_file(input);
-    const auto stream = acoustic::create_transfer_stream(data);
+    const auto stream = acoustic::create_transfer_stream(
+        data, acoustic::kDefaultBlockSize, input.filename().string());
     const acoustic::FskConfig config;
     const auto samples = acoustic::create_audio_frame(stream, config);
     acoustic::write_wav(output, samples, config.sample_rate);
     std::cout << "Encoded " << data.size() << " bytes into " << output
               << " (" << samples.size() << " samples, CRC32=";
     print_crc(data);
-    std::cout << ")\n";
+    std::cout << ", SHA-256=" << acoustic::sha256_hex(acoustic::sha256(data)) << ")\n";
     return 0;
 }
 
@@ -69,13 +73,39 @@ int decode(const std::filesystem::path& input, const std::filesystem::path& outp
     acoustic::FskConfig config;
     config.sample_rate = wav.sample_rate;
     const auto stream = acoustic::decode_audio_frame(wav.samples, config);
-    const auto data = acoustic::restore_transfer_stream(stream);
-    write_file(output, data);
-    std::cout << "Decoded " << data.size() << " bytes into " << output
+    const auto received = acoustic::receive_transfer_stream(stream);
+    auto destination = output;
+    if (std::filesystem::is_directory(output)) destination /= received.filename;
+    write_file(destination, received.data);
+    std::cout << "Decoded " << received.data.size() << " bytes into " << destination
               << " (integrity OK, CRC32=";
-    print_crc(data);
-    std::cout << ")\n";
+    print_crc(received.data);
+    std::cout << ", SHA-256=" << acoustic::sha256_hex(received.sha256) << ")\n";
     return 0;
+}
+
+int send(const std::filesystem::path& input) {
+    const auto temporary = std::filesystem::temp_directory_path() / "acoustic-transfer-send.wav";
+    encode(input, temporary);
+    const auto wav = acoustic::read_wav(temporary);
+    std::cout << "Playing acoustic frame (" << (wav.samples.size() / static_cast<double>(wav.sample_rate))
+              << " seconds). Keep the devices 0.5-1 m apart.\n";
+    acoustic::play_wav_file(temporary);
+    std::filesystem::remove(temporary);
+    std::cout << "Transmission finished.\n";
+    return 0;
+}
+
+int receive(const std::filesystem::path& output_directory, unsigned seconds) {
+    if (seconds == 0 || seconds > 300) throw std::invalid_argument("recording duration must be 1..300 seconds");
+    std::filesystem::create_directories(output_directory);
+    const auto temporary = std::filesystem::temp_directory_path() / "acoustic-transfer-receive.wav";
+    std::cout << "Recording for " << seconds << " seconds. Start the sender now...\n";
+    acoustic::record_wav_file(temporary, seconds);
+    std::cout << "Recording finished, searching for chirp...\n";
+    const auto result = decode(temporary, output_directory);
+    std::filesystem::remove(temporary);
+    return result;
 }
 
 int self_test() {
@@ -101,9 +131,10 @@ int main(int argc, char** argv) {
         if (command == "self-test") return self_test();
         if (command == "encode" && argc == 4) return encode(argv[2], argv[3]);
         if (command == "decode" && argc == 4) return decode(argv[2], argv[3]);
-        if (command == "send" || command == "receive") {
-            std::cerr << "Live audio is planned for the next stage.\n";
-            return 2;
+        if (command == "send" && argc == 3) return send(argv[2]);
+        if (command == "receive" && (argc == 3 || argc == 4)) {
+            const auto seconds = argc == 4 ? std::stoul(argv[3]) : 30UL;
+            return receive(argv[2], static_cast<unsigned>(seconds));
         }
         print_help();
         return 1;

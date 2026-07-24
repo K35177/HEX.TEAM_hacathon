@@ -6,9 +6,11 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_library(acoustic_core
+    src/audio/audio_device.cpp
     src/audio/wav.cpp
     src/protocol/crc32.cpp
     src/protocol/packet.cpp
+    src/protocol/sha256.cpp
     src/modem/fsk.cpp
     src/modem/framing.cpp
     src/transfer/transfer.cpp
@@ -40,3 +42,7 @@ add_test(NAME transfer_tests COMMAND transfer_tests)
 add_executable(framing_tests tests/framing_tests.cpp)
 target_link_libraries(framing_tests PRIVATE acoustic_core)
 add_test(NAME framing_tests COMMAND framing_tests)
+
+add_executable(sha256_tests tests/sha256_tests.cpp)
+target_link_libraries(sha256_tests PRIVATE acoustic_core)
+add_test(NAME sha256_tests COMMAND sha256_tests)
