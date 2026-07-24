@@ -10,6 +10,7 @@ add_library(acoustic_core
     src/protocol/crc32.cpp
     src/protocol/packet.cpp
     src/modem/fsk.cpp
+    src/modem/framing.cpp
     src/transfer/transfer.cpp
 )
 target_include_directories(acoustic_core PUBLIC include)
@@ -35,3 +36,7 @@ add_test(NAME fsk_tests COMMAND fsk_tests)
 add_executable(transfer_tests tests/transfer_tests.cpp)
 target_link_libraries(transfer_tests PRIVATE acoustic_core)
 add_test(NAME transfer_tests COMMAND transfer_tests)
+
+add_executable(framing_tests tests/framing_tests.cpp)
+target_link_libraries(framing_tests PRIVATE acoustic_core)
+add_test(NAME framing_tests COMMAND framing_tests)

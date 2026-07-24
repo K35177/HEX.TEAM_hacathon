@@ -1,5 +1,6 @@
 #include "acoustic/crc32.hpp"
 #include "acoustic/fsk.hpp"
+#include "acoustic/framing.hpp"
 #include "acoustic/packet.hpp"
 #include "acoustic/transfer.hpp"
 #include "acoustic/wav.hpp"
@@ -54,7 +55,7 @@ int encode(const std::filesystem::path& input, const std::filesystem::path& outp
     const auto data = read_file(input);
     const auto stream = acoustic::create_transfer_stream(data);
     const acoustic::FskConfig config;
-    const auto samples = acoustic::modulate_bits(stream, config);
+    const auto samples = acoustic::create_audio_frame(stream, config);
     acoustic::write_wav(output, samples, config.sample_rate);
     std::cout << "Encoded " << data.size() << " bytes into " << output
               << " (" << samples.size() << " samples, CRC32=";
@@ -67,7 +68,7 @@ int decode(const std::filesystem::path& input, const std::filesystem::path& outp
     const auto wav = acoustic::read_wav(input);
     acoustic::FskConfig config;
     config.sample_rate = wav.sample_rate;
-    const auto stream = acoustic::demodulate_bits(wav.samples, config);
+    const auto stream = acoustic::decode_audio_frame(wav.samples, config);
     const auto data = acoustic::restore_transfer_stream(stream);
     write_file(output, data);
     std::cout << "Decoded " << data.size() << " bytes into " << output
