@@ -1,0 +1,7 @@
+build/
+artifacts/recordings/*
+artifacts/received/*
+!artifacts/recordings/.gitkeep
+!artifacts/received/.gitkeep
+*.wav
+*.o
