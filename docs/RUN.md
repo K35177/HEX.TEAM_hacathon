@@ -25,17 +25,27 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-## Текущий запуск
+## Проверка
 
 ```bash
 ./build/acoustic-transfer self-test
 ```
 
-Команда проверяет сериализацию пакета, CRC32 и генерацию FSK-сэмплов. На
-текущем этапе `encode`, `decode`, `send` и `receive` уже зарезервированы в CLI,
-но будут подключаться последовательно в следующих версиях.
+Команда проверяет полный цикл в памяти: файл, пакеты, FSK-модуляцию,
+демодуляцию, сборку файла и CRC32.
 
-## Целевой запуск MVP
+## Передача через WAV
+
+```bash
+./build/acoustic-transfer encode artifacts/samples/demo.txt artifacts/recordings/demo.wav
+./build/acoustic-transfer decode artifacts/recordings/demo.wav artifacts/received/demo.txt
+cmp artifacts/samples/demo.txt artifacts/received/demo.txt
+```
+
+`encode` выводит размер и CRC32 исходного файла. `decode` проверяет CRC каждого
+пакета и всего восстановленного файла, а затем выводит `integrity OK`.
+
+## Целевой запуск через динамик и микрофон
 
 Передатчик:
 
@@ -49,12 +59,8 @@ ctest --test-dir build --output-on-failure
 ./build/acoustic-transfer receive artifacts/received
 ```
 
-Для воспроизводимой проверки без влияния помещения:
-
-```bash
-./build/acoustic-transfer encode artifacts/samples/demo.txt artifacts/recordings/demo.wav
-./build/acoustic-transfer decode artifacts/recordings/demo.wav artifacts/received
-```
-
 Устройства следует поставить на расстоянии 0,5–1 м, отключить обработку
 микрофона и начать с громкости динамика около 60–70%.
+
+Команды `send` и `receive` пока зарезервированы и сообщают, что live audio
+будет реализовано на следующем этапе.

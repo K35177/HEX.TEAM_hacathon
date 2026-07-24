@@ -4,8 +4,9 @@ MVP-система передачи произвольных файлов чер
 кодирует файл в пакетный звуковой сигнал, принимает его на другом устройстве,
 восстанавливает исходные байты и проверяет целостность.
 
-> Текущий этап: готов собираемый C++-каркас, CLI, модель пакета и CRC32.
-> Генерация и приём FSK-аудио будут добавлены следующим этапом.
+> Текущий этап: работает полный цикл `файл → FSK/WAV → файл`, разбиение на
+> блоки и проверка CRC32. Живые динамик и микрофон будут добавлены следующим
+> этапом.
 
 ## Быстрый запуск
 
@@ -28,16 +29,18 @@ cmake --build build
 Подробные инструкции находятся в [docs/RUN.md](docs/RUN.md), сценарий показа
 экспертам — в [docs/DEMO.md](docs/DEMO.md).
 
-## Планируемые команды MVP
+## Работающие команды
 
 ```bash
-# Преобразовать файл в WAV без использования аудиоустройства
 ./build/acoustic-transfer encode input.png transmission.wav
 
-# Восстановить файл из записи WAV
-./build/acoustic-transfer decode recording.wav received/
+./build/acoustic-transfer decode transmission.wav restored.png
+cmp input.png restored.png
+```
 
-# Передать через динамик и принять через микрофон
+## Планируемые команды живого аудио
+
+```bash
 ./build/acoustic-transfer send input.png
 ./build/acoustic-transfer receive received/
 ```
