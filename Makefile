@@ -1,5 +1,5 @@
 CXX ?= c++
-CXXFLAGS ?= -std=c++20 -O2 -Wall -Wextra -Wpedantic -Iinclude
+CXXFLAGS ?= -std=c++20 -O2 -Wall -Wextra -Wpedantic -pthread -Iinclude
 BUILD_DIR := build
 CORE_SOURCES := src/audio/audio_device.cpp src/audio/wav.cpp src/protocol/crc32.cpp src/protocol/packet.cpp src/protocol/sha256.cpp src/modem/fsk.cpp src/modem/framing.cpp src/transfer/transfer.cpp
 

@@ -1,9 +1,11 @@
 cmake_minimum_required(VERSION 3.16)
-project(acoustic_file_transfer VERSION 0.1.0 LANGUAGES CXX)
+project(acoustic_file_transfer VERSION 0.3.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+
+find_package(Threads REQUIRED)
 
 add_library(acoustic_core
     src/audio/audio_device.cpp
@@ -16,6 +18,7 @@ add_library(acoustic_core
     src/transfer/transfer.cpp
 )
 target_include_directories(acoustic_core PUBLIC include)
+target_link_libraries(acoustic_core PUBLIC Threads::Threads)
 target_compile_options(acoustic_core PRIVATE -Wall -Wextra -Wpedantic)
 
 add_executable(acoustic-transfer src/main.cpp)
