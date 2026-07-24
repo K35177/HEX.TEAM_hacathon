@@ -17,6 +17,8 @@ struct FskConfig {
 
 std::vector<float> modulate_bits(std::span<const std::uint8_t> bytes,
                                  const FskConfig& config = {});
+std::vector<std::uint8_t> demodulate_bits(std::span<const float> samples,
+                                          const FskConfig& config = {});
 std::size_t samples_per_symbol(const FskConfig& config);
 
 }  // namespace acoustic
