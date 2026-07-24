@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <iostream>
+#include <stdexcept>
 #include <vector>
 
 int main() {
@@ -23,5 +24,15 @@ int main() {
     std::filesystem::remove(wav_path);
     assert(received.data == original);
     assert(received.filename == "binary.dat");
+
+    auto damaged_metadata = stream;
+    damaged_metadata[15] ^= 1U;  // first byte of the declared SHA-256
+    bool sha_rejected = false;
+    try {
+        (void)acoustic::receive_transfer_stream(damaged_metadata);
+    } catch (const std::runtime_error&) {
+        sha_rejected = true;
+    }
+    assert(sha_rejected);
     std::cout << "transfer_tests: OK (300-byte binary round-trip)\n";
 }
