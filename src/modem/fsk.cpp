@@ -4,30 +4,46 @@
 #include <stdexcept>
 
 namespace acoustic {
+namespace {
+constexpr double pi = 3.14159265358979323846;
 
-std::size_t samples_per_symbol(const FskConfig& config) {
+void validate(const FskConfig& config) {
+    if (config.modulation_order != 2 && config.modulation_order != 4) {
+        throw std::invalid_argument("FSK modulation order must be 2 or 4");
+    }
     if (config.symbol_rate == 0 || config.sample_rate % config.symbol_rate != 0) {
         throw std::invalid_argument("sample rate must be divisible by symbol rate");
     }
+}
+}  // namespace
+
+std::size_t bits_per_symbol(const FskConfig& config) {
+    validate(config);
+    return config.modulation_order == 4 ? 2U : 1U;
+}
+
+std::size_t samples_per_symbol(const FskConfig& config) {
+    validate(config);
     return config.sample_rate / config.symbol_rate;
 }
 
 std::vector<float> modulate_bits(std::span<const std::uint8_t> bytes,
                                  const FskConfig& config) {
-    constexpr double pi = 3.14159265358979323846;
     const auto symbol_samples = samples_per_symbol(config);
+    const auto symbol_bits = bits_per_symbol(config);
+    const auto symbols_per_byte = 8U / symbol_bits;
     std::vector<float> output;
-    output.reserve(bytes.size() * 8 * symbol_samples);
+    output.reserve(bytes.size() * symbols_per_byte * symbol_samples);
     double phase = 0.0;
     for (const auto byte : bytes) {
-        for (int bit = 7; bit >= 0; --bit) {
-            const bool one = ((byte >> bit) & 1U) != 0;
-            const double frequency = one ? config.frequency_one : config.frequency_zero;
+        for (std::size_t part = 0; part < symbols_per_byte; ++part) {
+            const auto shift = 8U - symbol_bits * (part + 1U);
+            const auto symbol = (byte >> shift) & (config.modulation_order - 1U);
+            const double frequency = config.base_frequency + symbol * config.frequency_spacing;
             const double step = 2.0 * pi * frequency / config.sample_rate;
             for (std::size_t i = 0; i < symbol_samples; ++i) {
                 output.push_back(static_cast<float>(config.amplitude * std::sin(phase)));
-                phase += step;
-                if (phase >= 2.0 * pi) phase -= 2.0 * pi;
+                phase = std::fmod(phase + step, 2.0 * pi);
             }
         }
     }
@@ -36,31 +52,35 @@ std::vector<float> modulate_bits(std::span<const std::uint8_t> bytes,
 
 std::vector<std::uint8_t> demodulate_bits(std::span<const float> samples,
                                           const FskConfig& config) {
-    constexpr double pi = 3.14159265358979323846;
     const auto symbol_samples = samples_per_symbol(config);
+    const auto symbol_bits = bits_per_symbol(config);
+    const auto symbols_per_byte = 8U / symbol_bits;
     const auto symbol_count = samples.size() / symbol_samples;
-    if (symbol_count % 8U != 0) {
+    if (symbol_count % symbols_per_byte != 0) {
         throw std::runtime_error("audio does not contain a whole number of bytes");
     }
-    std::vector<std::uint8_t> output(symbol_count / 8U, 0);
-    for (std::size_t symbol = 0; symbol < symbol_count; ++symbol) {
-        double zero_sin = 0.0, zero_cos = 0.0;
-        double one_sin = 0.0, one_cos = 0.0;
-        for (std::size_t i = 0; i < symbol_samples; ++i) {
-            const double sample = samples[symbol * symbol_samples + i];
-            const double time = static_cast<double>(i) / config.sample_rate;
-            const double zero_phase = 2.0 * pi * config.frequency_zero * time;
-            const double one_phase = 2.0 * pi * config.frequency_one * time;
-            zero_sin += sample * std::sin(zero_phase);
-            zero_cos += sample * std::cos(zero_phase);
-            one_sin += sample * std::sin(one_phase);
-            one_cos += sample * std::cos(one_phase);
+    std::vector<std::uint8_t> output(symbol_count / symbols_per_byte, 0);
+    for (std::size_t position = 0; position < symbol_count; ++position) {
+        std::uint8_t best_symbol = 0;
+        double best_energy = -1.0;
+        for (std::uint8_t candidate = 0; candidate < config.modulation_order; ++candidate) {
+            const double frequency = config.base_frequency + candidate * config.frequency_spacing;
+            double sin_sum = 0.0, cos_sum = 0.0;
+            for (std::size_t i = 0; i < symbol_samples; ++i) {
+                const double sample = samples[position * symbol_samples + i];
+                const double phase = 2.0 * pi * frequency * i / config.sample_rate;
+                sin_sum += sample * std::sin(phase);
+                cos_sum += sample * std::cos(phase);
+            }
+            const double energy = sin_sum * sin_sum + cos_sum * cos_sum;
+            if (energy > best_energy) {
+                best_energy = energy;
+                best_symbol = candidate;
+            }
         }
-        const double zero_energy = zero_sin * zero_sin + zero_cos * zero_cos;
-        const double one_energy = one_sin * one_sin + one_cos * one_cos;
-        if (one_energy > zero_energy) {
-            output[symbol / 8U] |= static_cast<std::uint8_t>(1U << (7U - symbol % 8U));
-        }
+        const auto part = position % symbols_per_byte;
+        const auto shift = 8U - symbol_bits * (part + 1U);
+        output[position / symbols_per_byte] |= static_cast<std::uint8_t>(best_symbol << shift);
     }
     return output;
 }

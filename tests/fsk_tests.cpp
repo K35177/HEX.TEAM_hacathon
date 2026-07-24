@@ -16,5 +16,9 @@ int main() {
         noisy[i] += static_cast<float>((static_cast<int>(i % 17U) - 8) * 0.003);
     }
     assert(acoustic::demodulate_bits(noisy) == original);
+
+    acoustic::FskConfig robust;
+    robust.modulation_order = 2;
+    assert(acoustic::demodulate_bits(acoustic::modulate_bits(original, robust), robust) == original);
     std::cout << "fsk_tests: OK\n";
 }
