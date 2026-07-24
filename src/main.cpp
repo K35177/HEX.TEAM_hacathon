@@ -7,27 +7,86 @@
 #include "acoustic/transfer.hpp"
 #include "acoustic/wav.hpp"
 
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <cmath>
 #include <cstdint>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 namespace {
 
+int self_test();
+
 void print_help() {
     std::cout
-        << "Acoustic File Transfer 0.2.0\n\n"
+        << "Acoustic File Transfer 0.3.0\n\n"
         << "Usage:\n"
+        << "  acoustic-transfer                 # interactive menu\n"
+        << "  acoustic-transfer menu\n"
         << "  acoustic-transfer encode <input> <output.wav>\n"
         << "  acoustic-transfer decode <input.wav> <output>\n"
+        << "  acoustic-transfer check-audio\n"
         << "  acoustic-transfer self-test\n"
         << "  acoustic-transfer send <input>\n"
         << "  acoustic-transfer receive <output-dir> [seconds]\n";
+}
+
+std::string human_size(std::size_t bytes) {
+    const char* units[] = {"B", "KB", "MB", "GB"};
+    double value = static_cast<double>(bytes);
+    std::size_t unit = 0;
+    while (value >= 1024.0 && unit < 3) {
+        value /= 1024.0;
+        ++unit;
+    }
+    std::ostringstream out;
+    out << std::fixed << std::setprecision(unit == 0 ? 0 : 1) << value << ' ' << units[unit];
+    return out.str();
+}
+
+void draw_progress(std::string_view title, unsigned percent) {
+    constexpr unsigned width = 30;
+    const unsigned filled = percent * width / 100;
+    std::cout << '\r' << title << " [";
+    for (unsigned i = 0; i < width; ++i) std::cout << (i < filled ? "█" : "░");
+    std::cout << "] " << std::setw(3) << percent << '%' << std::flush;
+    if (percent == 100) std::cout << '\n';
+}
+
+template <typename Operation>
+void run_with_progress(std::string_view title, double expected_seconds, Operation operation) {
+    std::atomic<bool> done{false};
+    std::exception_ptr failure;
+    std::thread worker([&] {
+        try {
+            operation();
+        } catch (...) {
+            failure = std::current_exception();
+        }
+        done.store(true, std::memory_order_release);
+    });
+    const auto started = std::chrono::steady_clock::now();
+    while (!done.load(std::memory_order_acquire)) {
+        const auto elapsed = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - started).count();
+        const auto percent = static_cast<unsigned>(std::min(99.0, 100.0 * elapsed / expected_seconds));
+        draw_progress(title, percent);
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    worker.join();
+    if (failure) std::rethrow_exception(failure);
+    draw_progress(title, 100);
 }
 
 std::vector<std::uint8_t> read_file(const std::filesystem::path& path) {
@@ -75,7 +134,11 @@ int decode(const std::filesystem::path& input, const std::filesystem::path& outp
     const auto stream = acoustic::decode_audio_frame(wav.samples, config);
     const auto received = acoustic::receive_transfer_stream(stream);
     auto destination = output;
-    if (std::filesystem::is_directory(output)) destination /= received.filename;
+    if (std::filesystem::is_directory(output)) {
+        auto safe_name = std::filesystem::path(received.filename).filename();
+        if (safe_name.empty() || safe_name == "." || safe_name == "..") safe_name = "received.bin";
+        destination /= safe_name;
+    }
     write_file(destination, received.data);
     std::cout << "Decoded " << received.data.size() << " bytes into " << destination
               << " (integrity OK, CRC32=";
@@ -85,14 +148,20 @@ int decode(const std::filesystem::path& input, const std::filesystem::path& outp
 }
 
 int send(const std::filesystem::path& input) {
+    const auto file_size = std::filesystem::file_size(input);
+    const auto blocks = std::max<std::uintmax_t>(1, (file_size + acoustic::kDefaultBlockSize - 1) /
+                                                       acoustic::kDefaultBlockSize);
+    std::cout << "\nПередача: " << input.filename() << "\n"
+              << "Размер: " << human_size(file_size) << "\n"
+              << "Блоков: " << blocks << "\n\n";
     const auto temporary = std::filesystem::temp_directory_path() / "acoustic-transfer-send.wav";
     encode(input, temporary);
     const auto wav = acoustic::read_wav(temporary);
-    std::cout << "Playing acoustic frame (" << (wav.samples.size() / static_cast<double>(wav.sample_rate))
-              << " seconds). Keep the devices 0.5-1 m apart.\n";
-    acoustic::play_wav_file(temporary);
+    const auto duration = wav.samples.size() / static_cast<double>(wav.sample_rate);
+    std::cout << "Держите устройства на расстоянии 0,5–1 м.\n";
+    run_with_progress("Передача", duration, [&] { acoustic::play_wav_file(temporary); });
     std::filesystem::remove(temporary);
-    std::cout << "Transmission finished.\n";
+    std::cout << "Передача завершена.\n";
     return 0;
 }
 
@@ -100,12 +169,63 @@ int receive(const std::filesystem::path& output_directory, unsigned seconds) {
     if (seconds == 0 || seconds > 300) throw std::invalid_argument("recording duration must be 1..300 seconds");
     std::filesystem::create_directories(output_directory);
     const auto temporary = std::filesystem::temp_directory_path() / "acoustic-transfer-receive.wav";
-    std::cout << "Recording for " << seconds << " seconds. Start the sender now...\n";
-    acoustic::record_wav_file(temporary, seconds);
-    std::cout << "Recording finished, searching for chirp...\n";
+    std::cout << "\nПриём: запись " << seconds << " с. Запустите передатчик сейчас.\n";
+    run_with_progress("Запись   ", seconds, [&] { acoustic::record_wav_file(temporary, seconds); });
+    std::cout << "Поиск начала передачи и проверка файла...\n";
     const auto result = decode(temporary, output_directory);
     std::filesystem::remove(temporary);
     return result;
+}
+
+int check_audio_devices() {
+    const bool speaker = acoustic::command_available("aplay");
+    const bool microphone = acoustic::command_available("arecord");
+    std::cout << "\nДинамик (aplay):    " << (speaker ? "OK" : "НЕ НАЙДЕН")
+              << "\nМикрофон (arecord): " << (microphone ? "OK" : "НЕ НАЙДЕН") << "\n";
+    if (!speaker || !microphone) std::cout << "Установите пакет alsa-utils.\n";
+    return speaker && microphone ? 0 : 1;
+}
+
+int interactive_menu() {
+    for (;;) {
+        std::cout << "\n╔══════════════════════════════════════╗\n"
+                  << "║       Acoustic File Transfer         ║\n"
+                  << "╠══════════════════════════════════════╣\n"
+                  << "║  1. Передать файл                    ║\n"
+                  << "║  2. Принять файл                     ║\n"
+                  << "║  3. Проверить аудиоустройства        ║\n"
+                  << "║  4. Запустить самопроверку           ║\n"
+                  << "║  0. Выход                            ║\n"
+                  << "╚══════════════════════════════════════╝\n"
+                  << "Команда: " << std::flush;
+        std::string command;
+        if (!std::getline(std::cin, command) || command == "0" || command == "q") return 0;
+        try {
+            if (command == "1") {
+                std::cout << "Путь к файлу: " << std::flush;
+                std::string path;
+                std::getline(std::cin, path);
+                send(path);
+            } else if (command == "2") {
+                std::cout << "Папка для сохранения [artifacts/received]: " << std::flush;
+                std::string directory;
+                std::getline(std::cin, directory);
+                if (directory.empty()) directory = "artifacts/received";
+                std::cout << "Длительность записи, сек [30]: " << std::flush;
+                std::string duration;
+                std::getline(std::cin, duration);
+                receive(directory, duration.empty() ? 30U : static_cast<unsigned>(std::stoul(duration)));
+            } else if (command == "3") {
+                check_audio_devices();
+            } else if (command == "4") {
+                self_test();
+            } else {
+                std::cout << "Неизвестная команда. Выберите 0–4.\n";
+            }
+        } catch (const std::exception& error) {
+            std::cerr << "Ошибка: " << error.what() << '\n';
+        }
+    }
 }
 
 int self_test() {
@@ -122,13 +242,16 @@ int self_test() {
 
 int main(int argc, char** argv) {
     try {
-        if (argc < 2 || std::string_view(argv[1]) == "--help" ||
+        if (argc < 2) return interactive_menu();
+        if (std::string_view(argv[1]) == "--help" ||
             std::string_view(argv[1]) == "-h") {
             print_help();
-            return argc < 2 ? 1 : 0;
+            return 0;
         }
         const std::string_view command = argv[1];
         if (command == "self-test") return self_test();
+        if (command == "menu") return interactive_menu();
+        if (command == "check-audio") return check_audio_devices();
         if (command == "encode" && argc == 4) return encode(argv[2], argv[3]);
         if (command == "decode" && argc == 4) return decode(argv[2], argv[3]);
         if (command == "send" && argc == 3) return send(argv[2]);
