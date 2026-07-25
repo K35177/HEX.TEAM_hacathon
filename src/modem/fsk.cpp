@@ -55,10 +55,11 @@ std::vector<std::uint8_t> demodulate_bits(std::span<const float> samples,
     const auto symbol_samples = samples_per_symbol(config);
     const auto symbol_bits = bits_per_symbol(config);
     const auto symbols_per_byte = 8U / symbol_bits;
-    const auto symbol_count = samples.size() / symbol_samples;
-    if (symbol_count % symbols_per_byte != 0) {
-        throw std::runtime_error("audio does not contain a whole number of bytes");
-    }
+    // A microphone recording normally ends between modem symbols/bytes.  Only
+    // complete bytes can be decoded; the audio-frame length field decides how
+    // many of them belong to the payload.
+    const auto available_symbols = samples.size() / symbol_samples;
+    const auto symbol_count = available_symbols - available_symbols % symbols_per_byte;
     std::vector<std::uint8_t> output(symbol_count / symbols_per_byte, 0);
     for (std::size_t position = 0; position < symbol_count; ++position) {
         std::uint8_t best_symbol = 0;

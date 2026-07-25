@@ -17,6 +17,12 @@ int main() {
     }
     assert(acoustic::demodulate_bits(noisy) == original);
 
+    // Real microphone captures are not aligned to a byte or symbol boundary.
+    auto with_partial_byte = samples;
+    const auto one_symbol = acoustic::samples_per_symbol({});
+    with_partial_byte.insert(with_partial_byte.end(), one_symbol + one_symbol / 2U, 0.0F);
+    assert(acoustic::demodulate_bits(with_partial_byte) == original);
+
     acoustic::FskConfig robust;
     robust.modulation_order = 2;
     assert(acoustic::demodulate_bits(acoustic::modulate_bits(original, robust), robust) == original);

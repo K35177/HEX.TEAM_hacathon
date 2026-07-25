@@ -90,7 +90,10 @@ std::vector<std::uint8_t> decode_audio_frame(std::span<const float> samples,
     const auto payload_start = chirp_start + chirp_samples + guard_samples;
     if (payload_start >= samples.size()) throw std::runtime_error("audio frame has no payload");
     const auto symbol_samples = samples_per_symbol(modem);
-    const auto usable = ((samples.size() - payload_start) / symbol_samples) * symbol_samples;
+    const auto byte_symbols = 8U / bits_per_symbol(modem);
+    const auto available_symbols = (samples.size() - payload_start) / symbol_samples;
+    const auto complete_symbols = (available_symbols / byte_symbols) * byte_symbols;
+    const auto usable = complete_symbols * symbol_samples;
     auto decoded = demodulate_bits(samples.subspan(payload_start, usable), modem);
     if (decoded.size() < 4) throw std::runtime_error("audio frame length is missing");
     const std::size_t payload_size = (static_cast<std::size_t>(decoded[0]) << 24U) |
