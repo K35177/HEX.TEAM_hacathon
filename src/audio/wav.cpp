@@ -68,10 +68,18 @@ void write_wav(const std::filesystem::path& path,
     write_u32(out, sample_rate * channels * bits_per_sample / 8U);
     write_u16(out, channels * bits_per_sample / 8U); write_u16(out, bits_per_sample);
     out.write("data", 4); write_u32(out, data_size);
-    for (const float sample : samples) {
-        const float limited = std::clamp(sample, -1.0F, 1.0F);
-        const auto pcm = static_cast<std::int16_t>(std::lround(limited * 32767.0F));
-        write_u16(out, static_cast<std::uint16_t>(pcm));
+    std::array<char, 8192> buffer{};
+    for (std::size_t offset = 0; offset < samples.size();) {
+        const auto count = std::min<std::size_t>(buffer.size() / 2U, samples.size() - offset);
+        for (std::size_t i = 0; i < count; ++i) {
+            const float limited = std::clamp(samples[offset + i], -1.0F, 1.0F);
+            const auto pcm = static_cast<std::uint16_t>(static_cast<std::int16_t>(
+                std::lround(limited * 32767.0F)));
+            buffer[i * 2U] = static_cast<char>(pcm);
+            buffer[i * 2U + 1U] = static_cast<char>(pcm >> 8U);
+        }
+        out.write(buffer.data(), static_cast<std::streamsize>(count * 2U));
+        offset += count;
     }
     if (!out) throw std::runtime_error("failed while writing WAV file");
 }
@@ -104,9 +112,20 @@ WavData read_wav(const std::filesystem::path& path) {
             if (!format_found) throw std::runtime_error("WAV data precedes format");
             if (size % 2U != 0) throw std::runtime_error("invalid PCM data size");
             result.samples.reserve(size / 2U);
-            for (std::uint32_t i = 0; i < size / 2U; ++i) {
-                const auto pcm = static_cast<std::int16_t>(read_u16(in));
-                result.samples.push_back(static_cast<float>(pcm) / 32767.0F);
+            std::array<unsigned char, 8192> buffer{};
+            std::uint32_t remaining = size;
+            while (remaining != 0U) {
+                const auto count = std::min<std::uint32_t>(remaining,
+                    static_cast<std::uint32_t>(buffer.size()));
+                in.read(reinterpret_cast<char*>(buffer.data()), count);
+                if (!in) throw std::runtime_error("unexpected end of WAV file");
+                for (std::uint32_t i = 0; i < count; i += 2U) {
+                    const auto raw = static_cast<std::uint16_t>(buffer[i]) |
+                        (static_cast<std::uint16_t>(buffer[i + 1U]) << 8U);
+                    const auto pcm = static_cast<std::int16_t>(raw);
+                    result.samples.push_back(static_cast<float>(pcm) / 32767.0F);
+                }
+                remaining -= count;
             }
         } else {
             in.seekg(size + (size & 1U), std::ios::cur);

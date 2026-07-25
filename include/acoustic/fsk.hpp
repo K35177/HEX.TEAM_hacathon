@@ -14,12 +14,21 @@ struct FskConfig {
     double base_frequency = 1200.0;
     double frequency_spacing = 600.0;
     double amplitude = 0.75;
+    std::uint8_t symbol_repetitions = 1;
+};
+
+struct FskMetrics {
+    std::size_t symbol_count{};
+    double mean_confidence{};
+    double minimum_confidence{};
+    double estimated_frequency_offset_hz{};
 };
 
 std::vector<float> modulate_bits(std::span<const std::uint8_t> bytes,
                                  const FskConfig& config = {});
 std::vector<std::uint8_t> demodulate_bits(std::span<const float> samples,
-                                          const FskConfig& config = {});
+                                          const FskConfig& config = {},
+                                          FskMetrics* metrics = nullptr);
 std::size_t bits_per_symbol(const FskConfig& config);
 std::size_t samples_per_symbol(const FskConfig& config);
 

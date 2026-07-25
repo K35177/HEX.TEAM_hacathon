@@ -10,6 +10,10 @@
 #include <vector>
 
 int main() {
+    const auto estimate = acoustic::estimate_transfer(300, 128, 10);
+    assert(estimate.block_count == 3);
+    assert(estimate.stream_bytes == 47 + 10 + 300 + 3 * 19);
+
     std::vector<std::uint8_t> original(300);
     for (std::size_t i = 0; i < original.size(); ++i) {
         original[i] = static_cast<std::uint8_t>((i * 37U) & 0xFFU);

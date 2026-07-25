@@ -22,18 +22,31 @@ std::uint64_t read_u64(std::span<const std::uint8_t> data, std::size_t offset) {
 }
 }  // namespace
 
-std::vector<std::uint8_t> create_transfer_stream(
-    std::span<const std::uint8_t> file_data, std::size_t block_size, std::string_view filename) {
+TransferEstimate estimate_transfer(std::size_t file_size, std::size_t block_size,
+                                   std::size_t filename_size) {
     if (block_size == 0 || block_size > std::numeric_limits<std::uint16_t>::max()) {
         throw std::invalid_argument("invalid transfer block size");
     }
-    if (filename.size() > std::numeric_limits<std::uint16_t>::max()) {
+    if (filename_size > std::numeric_limits<std::uint16_t>::max()) {
         throw std::invalid_argument("filename is too long");
     }
-    const std::size_t count = std::max<std::size_t>(1, (file_data.size() + block_size - 1) / block_size);
+    const std::size_t count = file_size == 0 ? 1U : 1U + (file_size - 1U) / block_size;
     if (count > std::numeric_limits<std::uint16_t>::max()) {
         throw std::invalid_argument("file requires too many blocks");
     }
+    constexpr std::size_t packet_overhead = 19;
+    if (file_size > std::numeric_limits<std::size_t>::max() - metadata_size - filename_size ||
+        count > (std::numeric_limits<std::size_t>::max() - metadata_size - filename_size - file_size) /
+                    packet_overhead) {
+        throw std::invalid_argument("estimated transfer size overflows");
+    }
+    return {count, metadata_size + filename_size + file_size + count * packet_overhead};
+}
+
+std::vector<std::uint8_t> create_transfer_stream(
+    std::span<const std::uint8_t> file_data, std::size_t block_size, std::string_view filename) {
+    const auto estimate = estimate_transfer(file_data.size(), block_size, filename.size());
+    const auto count = estimate.block_count;
     std::vector<std::uint8_t> stream{'H','X','M','D',1,
         static_cast<std::uint8_t>(filename.size() >> 8U), static_cast<std::uint8_t>(filename.size())};
     append_u64(stream, file_data.size());

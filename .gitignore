@@ -5,3 +5,5 @@ artifacts/received/*
 !artifacts/received/.gitkeep
 *.wav
 *.o
+__pycache__/
+*.pyc

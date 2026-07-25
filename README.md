@@ -1,82 +1,134 @@
 # Acoustic File Transfer
 
-Консольная MVP-система передачи произвольных файлов через динамик и микрофон. Проект
-кодирует файл в пакетный звуковой сигнал, принимает его на другом устройстве,
-восстанавливает исходные байты и проверяет целостность.
+Консольное приложение для передачи произвольных файлов через динамик и
+микрофон. Файл преобразуется в синхронизированный FSK-сигнал, а после приёма
+проверяется по CRC32 каждого блока и SHA-256 всего содержимого.
 
-> Работает полный цикл `файл → FSK/WAV → файл`, живые динамик и микрофон,
-> автоматический поиск chirp-преамбулы, разбиение на блоки и проверка CRC32 и
-> SHA-256.
+В коде есть backend для Linux, macOS и Windows, три профиля канала,
+диагностическая калибровка, предварительная оценка передачи и лёгкий
+одностраничный UI на Tkinter. Windows-сборка и цифровой WAV-cycle проверены
+локально; Linux/macOS и реальный акустический тракт требуют результатов CI и
+полевой device matrix.
 
-## Быстрый запуск
+## Статус проекта
 
-Требования: Linux/macOS, компилятор с поддержкой C++20 и `make`.
+Текущая версия 0.5.0 — **лабораторный acoustic file transfer prototype**. Она умеет
+передать и проверить файл, но пока не является production-ready модемом:
+
+- вся попытка передаётся одним большим аудиокадром;
+- профиль выбирается вручную на обоих устройствах;
+- нет FEC, ACK/NACK, selective repeat и resume;
+- live path не потоковый: сначала создаётся или записывается полный WAV;
+- SHA-256 подтверждает целостность, но не отправителя;
+- калибровочный SNR является ориентировочной диагностикой.
+
+Подробный фактический разбор: [инженерный аудит](docs/AUDIT.md). Порядок
+превращения прототипа в современный модем: [roadmap](docs/ROADMAP.md).
+
+## Возможности
+
+- живая передача через динамик и микрофон;
+- детерминированный режим `файл → WAV → файл`;
+- автоматический поиск chirp-преамбулы;
+- поиск рассогласования аудиочасов в диапазоне ±2% (автотест покрывает 0,8%);
+- частотно-толерантное FSK-распознавание;
+- автоматическое или ручное усиление записи;
+- профили `fast`, `balanced` и `robust`;
+- команды `calibrate` и `estimate`;
+- измерение goodput/airtime через `benchmark` и воспроизводимый `channel-test`;
+- машинно-читаемый JSON для оценки и тестов эффективности;
+- receiver metrics: chirp correlation, clock error, confidence, frequency offset
+  и clipping;
+- безопасные уникальные временные файлы и атомарное сохранение результата;
+- защита от случайной перезаписи;
+- графическая панель без Electron, браузера и web-сервера.
+
+## Сборка
+
+Требуются CMake 3.16+ и компилятор с поддержкой C++20.
 
 ```bash
-make
+cmake -S . -B build
+cmake --build build --config Release
+ctest --test-dir build -C Release --output-on-failure
+```
+
+На Linux также доступен `make && make test`. Для live audio нужен пакет
+`alsa-utils`. Windows использует Windows Multimedia API, macOS — CoreAudio и
+системный `afplay`. Наличие backend-кода не заменяет проверку на реальном
+оборудовании; результаты совместимости должны фиксироваться в device matrix.
+
+После сборки выполните:
+
+```bash
 ./build/acoustic-transfer --help
 ./build/acoustic-transfer self-test
 ```
 
-Для обычного запуска без параметров открывается интерактивное меню:
+При генераторе Visual Studio бинарный файл обычно находится в
+`build/Release/acoustic-transfer.exe`.
+
+## UI
+
+UI использует стандартный Python 3.10+ с Tkinter и запускает тот же C++ CLI:
 
 ```bash
-./build/acoustic-transfer
+./build/acoustic-transfer ui
 ```
 
-Команды выбираются цифрами `1`–`4`; `0` завершает программу. Во время записи и
-воспроизведения отображается полоса прогресса.
+Также можно запустить `python3 ui/acoustic_ui.py`. На Linux Tkinter иногда нужно
+установить отдельным пакетом `python3-tk`. UI остаётся одним окном и не держит в
+памяти Chromium или локальный сервер. Причины выбора и production-компромиссы
+описаны в [документе о UI](docs/UI.md).
 
-Альтернативная сборка через CMake 3.16+:
+## Основные команды
 
 ```bash
-cmake -S . -B build
-cmake --build build
-./build/acoustic-transfer self-test
+acoustic-transfer profiles
+acoustic-transfer estimate input.png --profile balanced
+acoustic-transfer benchmark 256 --profile balanced
+acoustic-transfer channel-test 128 --profile balanced
+acoustic-transfer calibrate --profile balanced
+
+acoustic-transfer encode input.png transmission.wav --profile balanced
+acoustic-transfer decode transmission.wav restored.png --profile balanced
+
+acoustic-transfer receive artifacts/received --seconds 30 --profile balanced
+acoustic-transfer send input.png --profile balanced
 ```
 
-Подробные инструкции находятся в [docs/RUN.md](docs/RUN.md), сценарий показа
-экспертам — в [docs/DEMO.md](docs/DEMO.md).
+Приёмник запускается первым. На обоих устройствах должен быть выбран один
+профиль. `receive` принимает `--gain 0` для автоматического усиления или число
+от `0.1` до `50`.
 
-## Передача через WAV
+Существующий файл не перезаписывается без `--force`. При приёме в папку
+совпадающему имени автоматически добавляется номер копии.
 
-```bash
-./build/acoustic-transfer encode input.png transmission.wav
+## Профили
 
-./build/acoustic-transfer decode transmission.wav restored.png
-cmp input.png restored.png
-```
+| Профиль | Модуляция | Канальный bitrate | Блок | Назначение |
+|---|---:|---:|---:|---|
+| `fast` | 4-FSK | 600 бит/с | 1024 B | тихая комната, короткая дистанция |
+| `balanced` | 4-FSK | 400 бит/с | 512 B | режим по умолчанию |
+| `robust` | 2-FSK × 3 | 66 бит/с | 256 B | шум и реверберация |
 
-## Живая передача через динамик и микрофон
+Параметры находятся в `config/*.conf` и действительно загружаются приложением.
 
-```bash
-./build/acoustic-transfer send input.png
-./build/acoustic-transfer receive received/ 30
-```
+Подробности: [запуск](docs/RUN.md), [архитектура](docs/ARCHITECTURE.md),
+[демонстрация](docs/DEMO.md), [ограничения](docs/LIMITATIONS.md),
+[эффективность](docs/PERFORMANCE.md), [выбор UI](docs/UI.md),
+[аудит](docs/AUDIT.md), [roadmap](docs/ROADMAP.md).
 
-На Linux команды используют `aplay` и `arecord` из пакета `alsa-utils`.
-Получатель запускается первым; длительность записи можно указать последним
-аргументом. Усиление микрофонной записи работает автоматически. При
-необходимости укажите ручной коэффициент последним аргументом:
-
-```bash
-./build/acoustic-transfer receive artifacts/received 30 4
-```
-
-Здесь `30` — длительность записи в секундах, `4` — усиление в четыре раза.
-
-Архитектура и формат пакетов описаны в [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md),
-известные ограничения — в [docs/LIMITATIONS.md](docs/LIMITATIONS.md).
-
-## Структура репозитория
+## Структура
 
 ```text
-artifacts/          тестовые файлы, WAV-записи и результаты
-config/             профили скорости и надёжности
-docs/               запуск, демонстрация и техническое описание
-include/acoustic/   публичные C++-заголовки
-src/                реализация CLI, протокола, модема и аудио
+config/             профили модема и кадра
+docs/               инструкции и техническое описание
+include/acoustic/   публичные C++-интерфейсы
+src/                CLI, протокол, модем и аудиобэкенды
 tests/              автоматические тесты
+ui/                 одностраничная Tkinter-панель
+artifacts/           демонстрационные данные и результаты
 ```
 
 ## Лицензия

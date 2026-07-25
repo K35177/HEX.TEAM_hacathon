@@ -1,99 +1,134 @@
 # Инструкция по запуску
 
-## Системные требования
+## Требования
 
-- Linux;
-- C++20-компилятор (`g++` 10+ или `clang++` 12+);
-- GNU Make либо CMake 3.16+;
-- `alsa-utils` (`aplay` и `arecord`), динамик и микрофон.
+- Linux, macOS или Windows;
+- C++20-компилятор;
+- CMake 3.16+;
+- для UI — Python 3.10+ с Tkinter;
+- только для Linux live audio — `alsa-utils` (`aplay`, `arecord`).
 
-## Сборка
-
-Из корня репозитория:
-
-```bash
-make
-./build/acoustic-transfer --help
-make test
-```
-
-Через CMake:
+## Сборка и тесты
 
 ```bash
 cmake -S . -B build
-cmake --build build
-ctest --test-dir build --output-on-failure
+cmake --build build --config Release
+ctest --test-dir build -C Release --output-on-failure
 ```
 
-## Проверка
+Linux/macOS с одноконфигурационным генератором обычно создают
+`build/acoustic-transfer`. Visual Studio создаёт
+`build/Release/acoustic-transfer.exe`.
+
+На Linux можно использовать GNU Make:
 
 ```bash
-./build/acoustic-transfer self-test
+make
+make test
 ```
 
-Команда проверяет полный цикл в памяти: файл, пакеты, FSK-модуляцию,
-демодуляцию, сборку файла, CRC32 и SHA-256.
-
-Проверка доступности динамика и микрофона:
+## Первичная проверка
 
 ```bash
-./build/acoustic-transfer check-audio
+acoustic-transfer check-audio
+acoustic-transfer self-test --profile balanced
+acoustic-transfer profiles
 ```
 
-## Интерактивное меню
+`check-audio` показывает backend и базовое наличие устройств, но не доказывает
+работоспособность акустического тракта. `self-test` проверяет кадрирование,
+chirp, FSK, пакеты, CRC32 и SHA-256 без реального звука.
+
+## Оценка до передачи
 
 ```bash
-./build/acoustic-transfer
+acoustic-transfer estimate artifacts/samples/demo.txt --profile balanced
 ```
 
-Выберите действие цифрой и нажмите Enter. Меню позволяет передать или принять
-файл, проверить аудиоустройства и запустить самопроверку. `0` — выход.
+Команда показывает частоты, число блоков, длительность сигнала, рекомендуемое
+время записи, размер WAV, пиковую память, goodput и долю полезных бит в airtime.
+
+## Измерение эффективности
+
+```bash
+acoustic-transfer benchmark 256 --profile balanced
+acoustic-transfer channel-test 128 --profile balanced
+acoustic-transfer estimate input.png --profile balanced --json
+```
+
+`benchmark` измеряет чистый цифровой round-trip и CPU/realtime factor.
+`channel-test` прогоняет детерминированные AWGN, clock drift и clipping scenarios
+и считает completion/delivery efficiency. Это симулятор, а не замена реальному
+акустическому тесту. Все три команды поддерживают `--json`.
+
+## Калибровка
+
+```bash
+acoustic-transfer calibrate --profile balanced
+```
+
+Программа начинает запись, воспроизводит известный проверочный кадр, оценивает
+noise/signal windows и пытается полностью восстановить данные. Выводятся SNR
+estimate, chirp correlation, confidence, clock/frequency offset и clipping. Это
+ещё не лабораторное измерение: текущая версия не строит noise PSD и не измеряет
+response по каждой частоте. Если канал слабый, будет рекомендован `robust`.
+Устройства должны находиться в рабочем положении.
 
 ## Передача через WAV
 
 ```bash
-./build/acoustic-transfer encode artifacts/samples/demo.txt artifacts/recordings/demo.wav
-./build/acoustic-transfer decode artifacts/recordings/demo.wav artifacts/received/demo.txt
-cmp artifacts/samples/demo.txt artifacts/received/demo.txt
+acoustic-transfer encode input.png transmission.wav --profile balanced
+acoustic-transfer decode transmission.wav restored.png --profile balanced
 ```
 
-`encode` выводит размер и CRC32 исходного файла. `decode` проверяет CRC каждого
-пакета и всего восстановленного файла, а затем выводит `integrity OK`.
+Для разрешённой перезаписи добавьте `--force`. Для декодирования записи с тихим
+сигналом используйте `--gain 0` (auto) или, например, `--gain 4`.
 
-## Запуск через динамик и микрофон
+## Живая передача
 
-Передатчик:
+Сначала на принимающем устройстве:
 
 ```bash
-./build/acoustic-transfer send artifacts/samples/demo.txt
+acoustic-transfer receive artifacts/received --seconds 30 --profile balanced
 ```
 
-Приёмник (запускается первым):
+Затем на передающем:
 
 ```bash
-./build/acoustic-transfer receive artifacts/received
+acoustic-transfer send input.png --profile balanced
 ```
 
-Формат команды приёмника:
+Точное рекомендуемое значение `--seconds` предварительно показывает `estimate`.
+Профиль на устройствах должен совпадать.
+
+Старый позиционный формат также поддерживается:
 
 ```text
 receive <папка> [секунды] [усиление]
 ```
 
-По умолчанию запись длится 30 секунд, а усиление выбирается автоматически.
-Для тихого микрофона VM можно задать ручное усиление:
+## Графическая панель
 
 ```bash
-./build/acoustic-transfer receive artifacts/received 30 4
+acoustic-transfer ui
 ```
 
-Допустимый коэффициент — от `0.1` до `50`; `0` означает автоматический режим.
-Слишком большое усиление одновременно увеличивает фоновые шумы и может
-ухудшить распознавание.
+В одном окне доступны отправка, приём, WAV-кодирование, декодирование, estimate,
+benchmark, калибровка, проверка аудио и self-test. Долгая операция выполняется в
+отдельном процессе; её можно остановить кнопкой. Обоснование Tkinter и варианты
+production-упаковки: [UI.md](UI.md).
 
-Устройства следует поставить на расстоянии 0,5–1 м, отключить обработку
-микрофона и начать с громкости динамика около 60–70%.
+## Практические рекомендации
 
-Приёмник записывает звук заданное время, автоматически ищет начало сигнала,
-восстанавливает имя и содержимое файла и проверяет CRC32 и SHA-256. Во время
-записи и воспроизведения программа показывает прогресс.
+- расстояние между устройствами: 0,5–1 м;
+- начальная громкость динамика: 60–70%;
+- отключите подавление шума и автоматические «улучшения» микрофона;
+- сначала выполните `calibrate`;
+- для шумного помещения выберите `robust`, учитывая его низкую скорость.
+
+## Интерпретация результата
+
+`integrity OK` означает, что принятые байты совпали с заявленным SHA-256. Это не
+означает аутентификацию отправителя и не защищает от повторного проигрывания
+старой записи. Ограничения и актуальная зрелость описаны в
+[AUDIT.md](AUDIT.md).
