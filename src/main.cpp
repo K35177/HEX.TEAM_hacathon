@@ -55,7 +55,7 @@ int self_test(const acoustic::TransferProfile& profile);
 
 void print_help() {
     std::cout
-        << "Acoustic File Transfer 0.7.0\n\n"
+        << "Acoustic File Transfer 0.7.1\n\n"
         << "Использование:\n"
         << "  acoustic-transfer                         # интерактивное меню\n"
         << "  acoustic-transfer menu\n"
@@ -455,6 +455,8 @@ int decode(const std::filesystem::path& input, const std::filesystem::path& outp
     acoustic::TransferProfile detected_profile = profile;
     std::vector<std::string> failures;
     bool decoded = false;
+    bool damaged_turbo = false;
+    std::string damaged_turbo_profile;
     bool damaged_legacy_turbo = false;
     for (auto candidate : candidates) {
         candidate.modem.sample_rate = wav.sample_rate;
@@ -469,6 +471,11 @@ int decode(const std::filesystem::path& input, const std::filesystem::path& outp
             decoded = true;
             break;
         } catch (const std::exception& error) {
+            if ((candidate.name == "turbo" || candidate.name == "turbo-1600") &&
+                candidate_metrics.chirp_correlation >= 0.20) {
+                damaged_turbo = true;
+                damaged_turbo_profile = candidate.name;
+            }
             if (candidate.name == "turbo-v1" && candidate_metrics.chirp_correlation >= 0.20) {
                 damaged_legacy_turbo = true;
             }
@@ -494,12 +501,23 @@ int decode(const std::filesystem::path& input, const std::filesystem::path& outp
         std::ostringstream message;
         message << "не удалось распознать передачу ни в одном профиле";
         for (const auto& failure : failures) message << "\n  " << failure;
-        if (damaged_legacy_turbo) {
+        if (damaged_turbo) {
+            message << "\n  Сигнал " << damaged_turbo_profile
+                    << " найден, но акустический канал повредил кадр сильнее, чем может "
+                       "исправить FEC. Это не ошибка выбора профиля.";
+            if (requested_gain == 0.0 && applied_gain >= 19.99) {
+                message << " Автоусиление достигло предела x20: повысьте громкость динамика и уровень "
+                           "микрофона; отключите шумоподавление, AGC и «улучшения голоса». Целевое автоусиление — x2–x8.";
+            }
+            if (damaged_turbo_profile == "turbo-1600") {
+                message << " Для новой передачи обновите передатчик и выберите новый turbo 1,2–4,8 кГц.";
+            }
+        } else if (damaged_legacy_turbo) {
             message << "\n  Запись уверенно найдена как turbo-v1, но старый формат не содержит FEC: "
                        "повреждённые символы восстановить нельзя. Повторите передачу новой версией "
                        "с профилем turbo; вручную перебирать профили не требуется.";
         } else {
-            message << "\n  Совет: используйте новый turbo (1,2–6,0 кГц с FEC); "
+            message << "\n  Совет: используйте новый turbo (1,2–4,8 кГц с FEC); "
                        "приёмник определяет профиль автоматически.";
         }
         throw std::runtime_error(message.str());

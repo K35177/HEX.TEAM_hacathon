@@ -109,17 +109,31 @@ TransferProfile load_file(const std::filesystem::path& path, TransferProfile pro
 std::vector<TransferProfile> builtin_profiles() {
     TransferProfile turbo;
     turbo.name = "turbo";
-    turbo.description = "1600 bit/s 4-FSK with FEC for common speakers and microphones";
-    turbo.modem.symbol_rate = 800;
+    turbo.description = "1200 bit/s orthogonal 4-FSK with FEC for real acoustic channels";
+    turbo.modem.symbol_rate = 600;
     turbo.modem.modulation_order = 4;
     turbo.modem.base_frequency = 1200.0;
-    turbo.modem.frequency_spacing = 1600.0;
-    turbo.modem.amplitude = 0.65;
+    turbo.modem.frequency_spacing = 1200.0;
+    turbo.modem.amplitude = 0.70;
     turbo.block_size = 4096;
     turbo.frame.chirp_duration_seconds = 0.22;
     turbo.frame.guard_duration_seconds = 0.03;
     turbo.frame.chirp_start_frequency = 700.0;
-    turbo.frame.chirp_end_frequency = 6800.0;
+    turbo.frame.chirp_end_frequency = 5500.0;
+
+    TransferProfile turbo_1600;
+    turbo_1600.name = "turbo-1600";
+    turbo_1600.description = "legacy 0.7.0 turbo decoder for existing recordings";
+    turbo_1600.modem.symbol_rate = 800;
+    turbo_1600.modem.modulation_order = 4;
+    turbo_1600.modem.base_frequency = 1200.0;
+    turbo_1600.modem.frequency_spacing = 1600.0;
+    turbo_1600.modem.amplitude = 0.65;
+    turbo_1600.block_size = 4096;
+    turbo_1600.frame.chirp_duration_seconds = 0.22;
+    turbo_1600.frame.guard_duration_seconds = 0.03;
+    turbo_1600.frame.chirp_start_frequency = 700.0;
+    turbo_1600.frame.chirp_end_frequency = 6800.0;
 
     TransferProfile turbo_v1;
     turbo_v1.name = "turbo-v1";
@@ -179,7 +193,7 @@ std::vector<TransferProfile> builtin_profiles() {
     robust.frame.chirp_start_frequency = 700.0;
     robust.frame.chirp_end_frequency = 4200.0;
 
-    return {turbo, turbo_v1, wideband, fast, balanced, robust};
+    return {turbo, turbo_1600, turbo_v1, wideband, fast, balanced, robust};
 }
 
 void validate_profile(const TransferProfile& profile) {

@@ -466,7 +466,15 @@ std::vector<std::uint8_t> decode_audio_frame(std::span<const float> samples,
     const bool endpoint_is_measurable =
         noise_rms <= std::numeric_limits<double>::epsilon() ||
         acquisition_signal_rms >= noise_rms * 6.0;
-    if (metrics != nullptr) metrics->signal_rms = acquisition_signal_rms;
+    // Publish acquisition metrics immediately. Header/FEC failures are the
+    // cases where diagnostics matter most, so callers must not lose the
+    // detected preamble and level merely because decoding throws later.
+    if (metrics != nullptr) {
+        metrics->chirp_correlation = best_correlation;
+        metrics->clock_scale = clock_scale;
+        metrics->noise_rms = noise_rms;
+        metrics->signal_rms = acquisition_signal_rms;
+    }
     const auto symbol_samples = samples_per_symbol(modem);
     const auto byte_symbols = 8U / bits_per_symbol(modem);
     const auto protected_probe_bytes = 4U + protected_headers_bytes;
