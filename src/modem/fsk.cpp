@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <limits>
 #include <stdexcept>
@@ -11,8 +12,9 @@ namespace {
 constexpr double pi = 3.14159265358979323846;
 
 void validate(const FskConfig& config) {
-    if (config.modulation_order != 2 && config.modulation_order != 4) {
-        throw std::invalid_argument("FSK modulation order must be 2 or 4");
+    if (config.modulation_order != 2 && config.modulation_order != 4 &&
+        config.modulation_order != 16) {
+        throw std::invalid_argument("FSK modulation order must be 2, 4 or 16");
     }
     if (config.sample_rate == 0 || config.symbol_rate == 0 ||
         config.sample_rate % config.symbol_rate != 0) {
@@ -58,7 +60,7 @@ double tone_energy(std::span<const float> samples, std::size_t start,
 
 std::size_t bits_per_symbol(const FskConfig& config) {
     validate(config);
-    return config.modulation_order == 4 ? 2U : 1U;
+    return std::bit_width(static_cast<unsigned>(config.modulation_order)) - 1U;
 }
 
 std::size_t samples_per_symbol(const FskConfig& config) {
@@ -77,8 +79,8 @@ std::vector<float> modulate_bits(std::span<const std::uint8_t> bytes,
     const auto symbols_per_byte = 8U / symbol_bits;
     std::vector<float> output;
     output.reserve(bytes.size() * symbols_per_byte * symbol_samples);
-    std::array<double, 4> step_sines{};
-    std::array<double, 4> step_cosines{};
+    std::array<double, 16> step_sines{};
+    std::array<double, 16> step_cosines{};
     for (std::uint8_t symbol = 0; symbol < config.modulation_order; ++symbol) {
         const double frequency = config.base_frequency + symbol * config.frequency_spacing;
         const double step = 2.0 * pi * frequency / config.sample_rate;
@@ -132,7 +134,7 @@ std::vector<std::uint8_t> demodulate_bits(std::span<const float> samples,
     }
     const double tolerance = std::min(config.frequency_spacing * 0.12,
                                       config.symbol_rate * 0.20);
-    std::array<std::array<ToneDetector, 3>, 4> detectors{};
+    std::array<std::array<ToneDetector, 3>, 16> detectors{};
     constexpr std::array<double, 3> offset_multipliers{-1.0, 0.0, 1.0};
     for (std::uint8_t candidate = 0; candidate < config.modulation_order; ++candidate) {
         const double frequency = config.base_frequency + candidate * config.frequency_spacing;

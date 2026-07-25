@@ -16,5 +16,56 @@ int main() {
     assert(applied == 4.0);
     assert(std::abs(manual[0] - 0.4F) < 0.0001F);
     assert(manual[2] == 1.0F);
+
+    acoustic::SilenceDetector detector(1000, 5.0);
+    const std::vector<std::int16_t> silence(100, 60);
+    const std::vector<std::int16_t> signal(100, 8000);
+    for (int i = 0; i < 10; ++i) detector.process_pcm16(silence);
+    assert(!detector.signal_detected());
+    assert(!detector.should_stop());
+    detector.process_pcm16(signal);
+    assert(!detector.signal_detected());
+    detector.process_pcm16(signal);
+    assert(detector.signal_detected());
+    for (int i = 0; i < 49; ++i) detector.process_pcm16(silence);
+    assert(!detector.should_stop());
+    detector.process_pcm16(silence);
+    assert(detector.should_stop());
+
+    // A realistic quiet-room floor (~-41 dBFS) must not be mistaken for a
+    // transmission, while a signal around the user's observed x7 auto-gain
+    // level must start the silence timer reliably.
+    acoustic::SilenceDetector room_detector(1000, 5.0);
+    const std::vector<std::int16_t> room_noise(100, 300);
+    const std::vector<std::int16_t> moderate_signal(100, 1500);
+    for (int i = 0; i < 10; ++i) room_detector.process_pcm16(room_noise);
+    assert(!room_detector.signal_detected());
+    room_detector.process_pcm16(moderate_signal);
+    room_detector.process_pcm16(moderate_signal);
+    assert(room_detector.signal_detected());
+    for (int i = 0; i < 50; ++i) room_detector.process_pcm16(room_noise);
+    assert(room_detector.should_stop());
+
+    acoustic::SilenceDetector weak_detector(1000, 5.0);
+    const std::vector<std::int16_t> very_quiet_room(100, 2);
+    const std::vector<std::int16_t> weak_signal(100, 48);
+    for (int i = 0; i < 10; ++i) weak_detector.process_pcm16(very_quiet_room);
+    weak_detector.process_pcm16(weak_signal);
+    weak_detector.process_pcm16(weak_signal);
+    assert(weak_detector.signal_detected());
+    for (int i = 0; i < 25; ++i) weak_detector.process_pcm16(very_quiet_room);
+    // One short notification must not restart the five-second timer.
+    weak_detector.process_pcm16(weak_signal);
+    for (int i = 0; i < 25; ++i) weak_detector.process_pcm16(very_quiet_room);
+    assert(weak_detector.should_stop());
+
+    acoustic::SilenceDetector click_detector(1000, 5.0);
+    click_detector.process_pcm16(silence);
+    click_detector.process_pcm16(silence);
+    click_detector.process_pcm16(signal);
+    click_detector.process_pcm16(silence);
+    for (int i = 0; i < 50; ++i) click_detector.process_pcm16(silence);
+    assert(!click_detector.signal_detected());
+    assert(!click_detector.should_stop());
     std::cout << "audio_processing_tests: OK\n";
 }

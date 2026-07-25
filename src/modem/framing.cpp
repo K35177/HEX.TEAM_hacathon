@@ -2,8 +2,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <limits>
 #include <stdexcept>
+#include <utility>
 
 namespace acoustic {
 namespace {
@@ -42,15 +44,17 @@ double normalized_correlation(std::span<const float> samples, std::size_t start,
                               std::span<const float> reference, double scale,
                               std::size_t stride = 1) {
     if (scale <= 0.0 || reference.empty()) return -1.0;
-    const auto final_index = start + static_cast<std::size_t>(
-        std::llround((reference.size() - 1U) * scale));
-    if (final_index >= samples.size()) return -1.0;
+    const double final_position = start + (reference.size() - 1U) * scale;
+    if (std::ceil(final_position) >= samples.size()) return -1.0;
     double product = 0.0;
     double sample_energy = 0.0;
     double reference_energy = 0.0;
     for (std::size_t i = 0; i < reference.size(); i += stride) {
-        const auto source = start + static_cast<std::size_t>(std::llround(i * scale));
-        const double observed = samples[source];
+        const double source = start + i * scale;
+        const auto lower = static_cast<std::size_t>(source);
+        const auto upper = lower + 1U;
+        const double fraction = source - lower;
+        const double observed = samples[lower] * (1.0 - fraction) + samples[upper] * fraction;
         const double expected = reference[i];
         product += observed * expected;
         sample_energy += observed * observed;
@@ -120,20 +124,47 @@ std::vector<std::uint8_t> decode_audio_frame(std::span<const float> samples,
         noise_windows[noise_windows.size() / 20U];
     if (metrics != nullptr) metrics->noise_rms = noise_rms;
     const double threshold = std::max(0.015, noise_rms * 4.0);
-    std::size_t approximate_start = samples.size();
+    std::vector<std::pair<double, std::size_t>> energy_onsets;
+    bool energy_active = false;
     for (std::size_t offset = 0; offset + window <= samples.size(); offset += window / 2U) {
         double energy = 0.0;
         for (std::size_t i = 0; i < window; ++i) energy += samples[offset + i] * samples[offset + i];
-        if (std::sqrt(energy / window) > threshold) { approximate_start = offset; break; }
+        const double level = std::sqrt(energy / window);
+        const bool above_threshold = level > threshold;
+        if (above_threshold && !energy_active) energy_onsets.emplace_back(level, offset);
+        energy_active = above_threshold;
     }
-    if (approximate_start == samples.size()) throw std::runtime_error("chirp preamble not detected");
+    if (energy_onsets.empty()) throw std::runtime_error("chirp preamble not detected");
+    // A click, speech or notification may happen between starting the receiver
+    // and starting the sender. Search the strongest independent onsets instead
+    // of assuming the first loud window is the modem preamble.
+    constexpr std::size_t maximum_onsets = 32;
+    if (energy_onsets.size() > maximum_onsets) {
+        std::partial_sort(energy_onsets.begin(), energy_onsets.begin() + maximum_onsets,
+                          energy_onsets.end(), std::greater<>());
+        energy_onsets.resize(maximum_onsets);
+    }
     const auto reference = create_chirp(chirp_samples, modem, frame);
-    const auto search_begin = approximate_start > 2U * window ? approximate_start - 2U * window : 0;
-    const auto search_end = std::min(samples.size() - chirp_samples,
-                                     approximate_start + 3U * window);
-    std::size_t chirp_start = search_begin;
+    std::size_t approximate_start = energy_onsets.front().second;
+    std::size_t chirp_start = 0;
     double best_correlation = -1.0;
-    for (std::size_t candidate = search_begin; candidate <= search_end; ++candidate) {
+    for (const auto& [level, onset] : energy_onsets) {
+        (void)level;
+        const auto search_begin = onset > 2U * window ? onset - 2U * window : 0U;
+        const auto search_end = std::min(samples.size() - chirp_samples,
+                                         onset + 3U * window);
+        for (std::size_t candidate = search_begin; candidate <= search_end; candidate += 4U) {
+            const double correlation = normalized_correlation(samples, candidate, reference, 1.0, 8);
+            if (correlation > best_correlation) {
+                best_correlation = correlation;
+                chirp_start = candidate;
+                approximate_start = onset;
+            }
+        }
+    }
+    const auto initial_refine_begin = chirp_start > 4U ? chirp_start - 4U : 0U;
+    const auto initial_refine_end = std::min(samples.size() - chirp_samples, chirp_start + 4U);
+    for (std::size_t candidate = initial_refine_begin; candidate <= initial_refine_end; ++candidate) {
         const double correlation = normalized_correlation(samples, candidate, reference, 1.0, 2);
         if (correlation > best_correlation) {
             best_correlation = correlation;
@@ -141,16 +172,18 @@ std::vector<std::uint8_t> decode_audio_frame(std::span<const float> samples,
         }
     }
     if (metrics != nullptr) metrics->chirp_correlation = best_correlation;
-    if (best_correlation < 0.18) throw std::runtime_error("chirp preamble correlation is too weak");
 
     // Estimate the playback/capture clock ratio from the chirp and resample
     // the payload to nominal timing. This prevents symbol drift on long files.
     double clock_scale = 1.0;
     double best_scale_correlation = -1.0;
     std::size_t scaled_chirp_start = chirp_start;
-    const auto scale_search_begin = chirp_start > window ? chirp_start - window : 0U;
+    // The best unscaled chirp match can move hundreds of samples when a
+    // wideband chirp is captured with clock drift.  Anchor the joint
+    // start/scale search to the energy onset instead of that biased match.
+    const auto scale_search_begin = approximate_start > window ? approximate_start - window : 0U;
     const auto scale_search_end = std::min(samples.size() - chirp_samples,
-                                           chirp_start + window);
+                                           approximate_start + 2U * window);
     for (int step = -20; step <= 20; ++step) {
         const double candidate_scale = 1.0 + step * 0.001;
         for (std::size_t candidate_start = scale_search_begin;
@@ -180,6 +213,16 @@ std::vector<std::uint8_t> decode_audio_frame(std::span<const float> samples,
     if (metrics != nullptr) {
         metrics->chirp_correlation = best_correlation;
         metrics->clock_scale = clock_scale;
+    }
+    // Do not reject a marginal coarse match before the joint position/clock
+    // search has had a chance to recover it.  Payload CRC32 and the transfer
+    // SHA-256 remain the hard acceptance gates, so a softer acquisition limit
+    // improves real microphone tolerance without accepting a damaged file.
+    constexpr double minimum_chirp_correlation = 0.10;
+    if (best_correlation < minimum_chirp_correlation) {
+        throw std::runtime_error("chirp preamble correlation is too weak (best=" +
+                                 std::to_string(best_correlation) + ", minimum=" +
+                                 std::to_string(minimum_chirp_correlation) + ')');
     }
     const auto payload_start = chirp_start + static_cast<std::size_t>(std::llround(
         (chirp_samples + guard_samples) * clock_scale));

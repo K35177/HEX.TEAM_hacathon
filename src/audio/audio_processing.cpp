@@ -57,4 +57,62 @@ double apply_receive_gain(std::span<float> samples,
     return gain;
 }
 
+SilenceDetector::SilenceDetector(unsigned sample_rate, double silence_seconds)
+    : sample_rate_(sample_rate) {
+    if (sample_rate == 0 || !std::isfinite(silence_seconds) || silence_seconds < 1.0 ||
+        silence_seconds > 60.0) {
+        throw std::invalid_argument("invalid silence detector configuration");
+    }
+    initialization_samples_ = sample_rate / 5U;
+    required_activity_samples_ = sample_rate / 5U;
+    required_silence_samples_ = static_cast<std::size_t>(
+        std::ceil(silence_seconds * sample_rate));
+}
+
+void SilenceDetector::process_pcm16(std::span<const std::int16_t> samples) {
+    if (samples.empty() || should_stop_) return;
+    double energy = 0.0;
+    for (const auto sample : samples) {
+        const double normalized = static_cast<double>(sample) / 32768.0;
+        energy += normalized * normalized;
+    }
+    const double rms = std::sqrt(energy / samples.size());
+    processed_samples_ += samples.size();
+
+    if (processed_samples_ <= initialization_samples_) {
+        const auto previous_samples = processed_samples_ - samples.size();
+        noise_rms_ = previous_samples == 0 ? rms :
+            (noise_rms_ * previous_samples + rms * samples.size()) / processed_samples_;
+        return;
+    }
+
+    if (!signal_detected_) {
+        const double activation_threshold = std::max(0.001, noise_rms_ * 2.5);
+        if (rms > activation_threshold) {
+            active_samples_ += samples.size();
+            if (active_samples_ >= required_activity_samples_) {
+                signal_detected_ = true;
+                silent_samples_ = 0;
+            }
+        } else {
+            active_samples_ = 0;
+            noise_rms_ = noise_rms_ * 0.98 + rms * 0.02;
+        }
+        return;
+    }
+
+    const double activity_threshold = std::max(0.001, noise_rms_ * 2.5);
+    if (rms < activity_threshold) {
+        silent_samples_ += samples.size();
+        resumed_activity_samples_ = 0;
+        should_stop_ = silent_samples_ >= required_silence_samples_;
+    } else {
+        resumed_activity_samples_ += samples.size();
+        if (resumed_activity_samples_ >= required_activity_samples_) {
+            silent_samples_ = 0;
+            resumed_activity_samples_ = required_activity_samples_;
+        }
+    }
+}
+
 }  // namespace acoustic

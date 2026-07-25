@@ -30,7 +30,7 @@ UI/CLI → transfer → packet → framing → modem → audio
 
 Цель: перестать оценивать качество только по `decoded/not decoded`.
 
-Статус 0.5.0: этап выполняется. Уже есть `ReceiverMetrics`, JSON для
+Статус 0.6.0: этап выполняется. Уже есть `ReceiverMetrics`, JSON для
 `estimate`/`benchmark`/`channel-test`, goodput/airtime/delivery efficiency,
 исправленные noise/signal windows и начальный channel simulator. Остались
 per-tone response, единый JSON для live/decode, BER/PER и явное управление
@@ -71,7 +71,8 @@ frame_index | ack_window | payload_length | header_crc/fec
 ```
 
 - добавить periodic pilots и end-of-frame marker;
-- реализовать автоматическую остановку после последнего кадра.
+- заменить уже реализованную остановку по пяти секундам тишины на защищённый
+  end-of-session marker после последнего кадра.
 
 ### Критерии готовности
 

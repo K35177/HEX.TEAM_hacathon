@@ -1,4 +1,5 @@
 build/
+dist/
 artifacts/recordings/*
 artifacts/received/*
 !artifacts/recordings/.gitkeep

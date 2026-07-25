@@ -107,6 +107,20 @@ TransferProfile load_file(const std::filesystem::path& path, TransferProfile pro
 }  // namespace
 
 std::vector<TransferProfile> builtin_profiles() {
+    TransferProfile turbo;
+    turbo.name = "turbo";
+    turbo.description = "3200 bit/s for a quiet short-range wideband channel";
+    turbo.modem.symbol_rate = 800;
+    turbo.modem.modulation_order = 16;
+    turbo.modem.base_frequency = 1500.0;
+    turbo.modem.frequency_spacing = 900.0;
+    turbo.modem.amplitude = 0.70;
+    turbo.block_size = 4096;
+    turbo.frame.chirp_duration_seconds = 0.20;
+    turbo.frame.guard_duration_seconds = 0.03;
+    turbo.frame.chirp_start_frequency = 900.0;
+    turbo.frame.chirp_end_frequency = 19000.0;
+
     TransferProfile fast;
     fast.name = "fast";
     fast.description = "600 bit/s for a quiet short-range channel";
@@ -137,7 +151,7 @@ std::vector<TransferProfile> builtin_profiles() {
     robust.frame.chirp_start_frequency = 700.0;
     robust.frame.chirp_end_frequency = 4200.0;
 
-    return {fast, balanced, robust};
+    return {turbo, fast, balanced, robust};
 }
 
 void validate_profile(const TransferProfile& profile) {

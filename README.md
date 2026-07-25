@@ -4,7 +4,7 @@
 микрофон. Файл преобразуется в синхронизированный FSK-сигнал, а после приёма
 проверяется по CRC32 каждого блока и SHA-256 всего содержимого.
 
-В коде есть backend для Linux, macOS и Windows, три профиля канала,
+В коде есть backend для Linux, macOS и Windows, четыре профиля канала,
 диагностическая калибровка, предварительная оценка передачи и лёгкий
 одностраничный UI на Tkinter. Windows-сборка и цифровой WAV-cycle проверены
 локально; Linux/macOS и реальный акустический тракт требуют результатов CI и
@@ -12,13 +12,14 @@
 
 ## Статус проекта
 
-Текущая версия 0.5.0 — **лабораторный acoustic file transfer prototype**. Она умеет
+Текущая версия 0.6.0 — **лабораторный acoustic file transfer prototype**. Она умеет
 передать и проверить файл, но пока не является production-ready модемом:
 
 - вся попытка передаётся одним большим аудиокадром;
 - профиль выбирается вручную на обоих устройствах;
 - нет FEC, ACK/NACK, selective repeat и resume;
-- live path не потоковый: сначала создаётся или записывается полный WAV;
+- live path ещё не end-to-end streaming: sender сначала создаёт полный WAV, а
+  receiver декодирует накопленную запись после пяти секунд тишины;
 - SHA-256 подтверждает целостность, но не отправителя;
 - калибровочный SNR является ориентировочной диагностикой.
 
@@ -33,7 +34,7 @@
 - поиск рассогласования аудиочасов в диапазоне ±2% (автотест покрывает 0,8%);
 - частотно-толерантное FSK-распознавание;
 - автоматическое или ручное усиление записи;
-- профили `fast`, `balanced` и `robust`;
+- профили `turbo`, `fast`, `balanced` и `robust`;
 - команды `calibrate` и `estimate`;
 - измерение goodput/airtime через `benchmark` и воспроизводимый `channel-test`;
 - машинно-читаемый JSON для оценки и тестов эффективности;
@@ -76,10 +77,35 @@ UI использует стандартный Python 3.10+ с Tkinter и зап
 ./build/acoustic-transfer ui
 ```
 
+На Windows для обычного пользователя собирается отдельный GUI-launcher:
+
+```text
+build/acoustic-client.exe
+```
+
+Двойной щелчок по нему сразу открывает UI без консольного меню. Переносимый
+комплект создаётся командой `mingw32-make package` в
+`dist/AcousticFileTransfer/`; внутри клиент, backend, профили и UI уже лежат в
+правильной структуре.
+
+Полностью автономный Windows-файл, включающий Python/Tk, backend и профили:
+
+```powershell
+mingw32-make onefile
+```
+
+Результат: `dist/AcousticFileTransfer.exe`. На компьютере пользователя Python
+не требуется; one-file приложение распаковывает внутренние компоненты во
+временный каталог при запуске.
+
 Также можно запустить `python3 ui/acoustic_ui.py`. На Linux Tkinter иногда нужно
 установить отдельным пакетом `python3-tk`. UI остаётся одним окном и не держит в
 памяти Chromium или локальный сервер. Причины выбора и production-компромиссы
 описаны в [документе о UI](docs/UI.md).
+
+Назначение каждой кнопки и рекомендуемый порядок действий приведены в
+[руководстве по интерфейсу](docs/UI_GUIDE.md). Эти же подсказки доступны внутри
+приложения по кнопке «Что делает каждая кнопка?».
 
 ## Основные команды
 
@@ -93,13 +119,15 @@ acoustic-transfer calibrate --profile balanced
 acoustic-transfer encode input.png transmission.wav --profile balanced
 acoustic-transfer decode transmission.wav restored.png --profile balanced
 
-acoustic-transfer receive artifacts/received --seconds 30 --profile balanced
-acoustic-transfer send input.png --profile balanced
+acoustic-transfer receive artifacts/received --profile turbo
+acoustic-transfer send input.png --profile turbo
 ```
 
-Приёмник запускается первым. На обоих устройствах должен быть выбран один
-профиль. `receive` принимает `--gain 0` для автоматического усиления или число
-от `0.1` до `50`.
+Приёмник запускается первым и автоматически завершает запись после пяти секунд
+устойчивой тишины, но только когда перед этим был обнаружен сигнал. На обоих
+устройствах рекомендуется выбрать один профиль; при ошибке приёмник также
+проверит остальные встроенные профили. `receive` принимает `--gain 0` для
+автоматического усиления или число от `0.1` до `50`.
 
 Существующий файл не перезаписывается без `--force`. При приёме в папку
 совпадающему имени автоматически добавляется номер копии.
@@ -108,6 +136,7 @@ acoustic-transfer send input.png --profile balanced
 
 | Профиль | Модуляция | Канальный bitrate | Блок | Назначение |
 |---|---:|---:|---:|---|
+| `turbo` | 16-FSK | 3200 бит/с | 4096 B | максимальная скорость, короткая дистанция |
 | `fast` | 4-FSK | 600 бит/с | 1024 B | тихая комната, короткая дистанция |
 | `balanced` | 4-FSK | 400 бит/с | 512 B | режим по умолчанию |
 | `robust` | 2-FSK × 3 | 66 бит/с | 256 B | шум и реверберация |
@@ -117,6 +146,7 @@ acoustic-transfer send input.png --profile balanced
 Подробности: [запуск](docs/RUN.md), [архитектура](docs/ARCHITECTURE.md),
 [демонстрация](docs/DEMO.md), [ограничения](docs/LIMITATIONS.md),
 [эффективность](docs/PERFORMANCE.md), [выбор UI](docs/UI.md),
+[кнопки интерфейса](docs/UI_GUIDE.md),
 [аудит](docs/AUDIT.md), [roadmap](docs/ROADMAP.md).
 
 ## Структура

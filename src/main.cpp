@@ -35,7 +35,7 @@ struct CliArguments {
     std::vector<std::string> positional;
     std::string profile = "balanced";
     double gain = 0.0;
-    unsigned seconds = 30;
+    unsigned seconds = 3600;
     bool gain_set = false;
     bool seconds_set = false;
     bool force = false;
@@ -55,7 +55,7 @@ int self_test(const acoustic::TransferProfile& profile);
 
 void print_help() {
     std::cout
-        << "Acoustic File Transfer 0.5.0\n\n"
+        << "Acoustic File Transfer 0.6.0\n\n"
         << "Использование:\n"
         << "  acoustic-transfer                         # интерактивное меню\n"
         << "  acoustic-transfer menu\n"
@@ -67,11 +67,11 @@ void print_help() {
         << "  acoustic-transfer encode <файл> <output.wav> [--profile <имя>] [--force]\n"
         << "  acoustic-transfer decode <input.wav> <файл|папка> [--profile <имя>] [--gain <x>] [--force]\n"
         << "  acoustic-transfer send <файл> [--profile <имя>]\n"
-        << "  acoustic-transfer receive <папка> [секунды] [усиление] [--profile <имя>] [--force]\n"
+        << "  acoustic-transfer receive <папка> [--gain <x>] [--max-seconds <n>] [--profile <имя>] [--force]\n"
         << "  acoustic-transfer calibrate [--profile <имя>]\n"
         << "  acoustic-transfer check-audio\n"
         << "  acoustic-transfer self-test [--profile <имя>]\n\n"
-        << "Профили: fast, balanced (по умолчанию), robust. Усиление 0 включает auto.\n";
+        << "Профили: turbo, fast, balanced (по умолчанию), robust. Усиление 0 включает auto.\n";
 }
 
 std::string trim(std::string value) {
@@ -131,7 +131,7 @@ CliArguments parse_arguments(int argc, char** argv, int first) {
         else if (argument == "--gain") {
             result.gain = parse_double(require_value(argument), "усиление");
             result.gain_set = true;
-        } else if (argument == "--seconds") {
+        } else if (argument == "--seconds" || argument == "--max-seconds") {
             result.seconds = parse_unsigned(require_value(argument), "длительность");
             result.seconds_set = true;
         } else if (argument == "--force") result.force = true;
@@ -374,8 +374,7 @@ void print_estimate(const std::filesystem::path& input, const acoustic::Transfer
               << "  Эффективность:     " << efficiency << "% полезных бит/airtime\n"
               << "  Блоков:            " << estimate.transfer.block_count << '\n'
               << "  Аудио:             " << human_duration(estimate.duration_seconds) << '\n'
-              << "  Запись приёмника:  " << static_cast<unsigned>(std::ceil(estimate.duration_seconds + 3.0))
-              << " с или больше\n"
+              << "  Приёмник:          остановится после 5 с тишины\n"
               << "  WAV:               " << human_size(estimate.wav_bytes) << '\n'
               << "  Пиковая память:    около " << human_size(estimate.working_memory_bytes) << "\n\n";
 }
@@ -433,16 +432,55 @@ std::filesystem::path received_destination(const std::filesystem::path& output,
 }
 
 int decode(const std::filesystem::path& input, const std::filesystem::path& output,
-           const acoustic::TransferProfile& profile, double requested_gain, bool force) {
+           const acoustic::TransferProfile& profile, double requested_gain, bool force,
+           bool detect_profile = false) {
     auto wav = acoustic::read_wav(input);
-    auto modem = profile.modem;
-    modem.sample_rate = wav.sample_rate;
     const auto applied_gain = acoustic::apply_receive_gain(wav.samples, requested_gain);
     std::cout << "Усиление записи: x" << std::fixed << std::setprecision(2) << applied_gain
               << (requested_gain == 0.0 ? " (auto)\n" : " (manual)\n");
+    if (requested_gain == 0.0 && applied_gain >= 19.99) {
+        std::cout << "Предупреждение: запись очень тихая. Проверьте вход Windows, "
+                     "громкость передатчика и расстояние.\n";
+    }
+
+    std::vector<acoustic::TransferProfile> candidates{profile};
+    if (detect_profile) {
+        for (const auto& builtin : acoustic::builtin_profiles()) {
+            if (builtin.name != profile.name) candidates.push_back(acoustic::load_profile(builtin.name));
+        }
+    }
     acoustic::ReceiverMetrics metrics;
-    const auto stream = acoustic::decode_audio_frame(wav.samples, modem, profile.frame, &metrics);
-    const auto received = acoustic::receive_transfer_stream(stream);
+    acoustic::ReceivedFile received;
+    acoustic::TransferProfile detected_profile = profile;
+    std::vector<std::string> failures;
+    bool decoded = false;
+    for (auto candidate : candidates) {
+        candidate.modem.sample_rate = wav.sample_rate;
+        try {
+            acoustic::ReceiverMetrics candidate_metrics;
+            const auto stream = acoustic::decode_audio_frame(
+                wav.samples, candidate.modem, candidate.frame, &candidate_metrics);
+            auto candidate_file = acoustic::receive_transfer_stream(stream);
+            metrics = candidate_metrics;
+            received = std::move(candidate_file);
+            detected_profile = std::move(candidate);
+            decoded = true;
+            break;
+        } catch (const std::exception& error) {
+            failures.push_back(candidate.name + ": " + error.what());
+        } catch (...) {
+            failures.push_back(candidate.name + ": неизвестная ошибка декодирования");
+        }
+    }
+    if (!decoded) {
+        std::ostringstream message;
+        message << "не удалось распознать передачу ни в одном профиле";
+        for (const auto& failure : failures) message << "\n  " << failure;
+        throw std::runtime_error(message.str());
+    }
+    if (detected_profile.name != profile.name) {
+        std::cout << "Профиль определён автоматически: " << detected_profile.name << '\n';
+    }
     const auto destination = received_destination(output, received.filename, force);
     auto parent = destination.parent_path();
     if (!parent.empty() && !std::filesystem::is_directory(parent)) {
@@ -462,6 +500,7 @@ int decode(const std::filesystem::path& input, const std::filesystem::path& outp
     print_crc(received.data);
     std::cout << ", SHA-256=" << acoustic::sha256_hex(received.sha256) << ")\n"
               << std::fixed << std::setprecision(3)
+              << "Профиль: " << detected_profile.name << '\n'
               << "Метрики: chirp=" << metrics.chirp_correlation
               << ", clock=" << (metrics.clock_scale - 1.0) * 1'000'000.0 << " ppm"
               << ", confidence=" << metrics.mean_symbol_confidence * 100.0 << "%"
@@ -679,10 +718,10 @@ int send(const std::filesystem::path& input, const acoustic::TransferProfile& pr
     return 0;
 }
 
-int receive(const std::filesystem::path& output_directory, unsigned seconds, double gain,
+int receive(const std::filesystem::path& output_directory, unsigned maximum_seconds, double gain,
             const acoustic::TransferProfile& profile, bool force) {
-    if (seconds == 0 || seconds > 3600) {
-        throw std::invalid_argument("длительность записи должна быть от 1 до 3600 секунд");
+    if (maximum_seconds <= 5 || maximum_seconds > 3600) {
+        throw std::invalid_argument("максимальная длительность записи должна быть от 6 до 3600 секунд");
     }
     if (std::filesystem::exists(output_directory) &&
         !std::filesystem::is_directory(output_directory)) {
@@ -690,13 +729,27 @@ int receive(const std::filesystem::path& output_directory, unsigned seconds, dou
     }
     std::filesystem::create_directories(output_directory);
     TemporaryPath temporary("receive");
-    std::cout << "\nПриём: запись " << seconds << " с, профиль " << profile.name
-              << ". Запустите передатчик сейчас.\n";
-    run_with_progress("Запись   ", seconds, [&] {
-        acoustic::record_wav_file(temporary.path(), seconds, profile.modem.sample_rate);
-    });
+    std::cout << "\nПриём: профиль " << profile.name
+              << ". Запустите передатчик сейчас. Запись остановится после 5 с тишины.\n";
+    const auto recording = acoustic::record_wav_until_silence(
+        temporary.path(), profile.modem.sample_rate, 5, maximum_seconds);
+    std::cout << std::fixed << std::setprecision(1)
+              << "Запись завершена: " << recording.duration_seconds << " с"
+              << (recording.stopped_after_silence ? " (обнаружено 5 с тишины)\n" :
+                  " (достигнут защитный лимит)\n");
     std::cout << "Поиск сигнала и проверка файла...\n";
-    return decode(temporary.path(), output_directory, profile, gain, force);
+    try {
+        return decode(temporary.path(), output_directory, profile, gain, force, true);
+    } catch (...) {
+        const auto diagnostic = received_destination(output_directory, "failed-receive.wav", false);
+        std::error_code copy_error;
+        std::filesystem::copy_file(temporary.path(), diagnostic,
+                                   std::filesystem::copy_options::none, copy_error);
+        if (!copy_error) {
+            std::cout << "Диагностическая запись сохранена: " << diagnostic << '\n';
+        }
+        throw;
+    }
 }
 
 int check_audio_devices() {
@@ -807,7 +860,7 @@ std::filesystem::path prompt_input_file() {
 }
 
 std::string prompt_profile(std::string current) {
-    std::cout << "Профиль fast/balanced/robust [" << current << "]: " << std::flush;
+    std::cout << "Профиль turbo/fast/balanced/robust [" << current << "]: " << std::flush;
     std::string value;
     std::getline(std::cin, value);
     value = trim(std::move(value));
@@ -843,13 +896,10 @@ int interactive_menu() {
                 std::string directory;
                 std::getline(std::cin, directory);
                 if (trim(directory).empty()) directory = "artifacts/received";
-                std::cout << "Длительность записи, сек [30]: " << std::flush;
-                std::string duration;
-                std::getline(std::cin, duration);
                 std::cout << "Усиление [auto]: " << std::flush;
                 std::string gain;
                 std::getline(std::cin, gain);
-                receive(normalize_path(directory), trim(duration).empty() ? 30U : parse_unsigned(trim(duration), "длительность"),
+                receive(normalize_path(directory), 3600U,
                         trim(gain).empty() ? 0.0 : parse_double(trim(gain), "усиление"), profile, false);
             } else if (command == "3") {
                 const auto path = prompt_input_file();
@@ -996,7 +1046,7 @@ int main(int argc, char** argv) {
                 throw std::invalid_argument("decode не принимает --seconds или --json");
             }
             return decode(normalize_path(arguments.positional[0]), normalize_path(arguments.positional[1]),
-                          profile, arguments.gain, arguments.force);
+                          profile, arguments.gain, arguments.force, true);
         }
         if (command == "send" && arguments.positional.size() == 1) {
             if (arguments.gain_set || arguments.seconds_set || arguments.force || arguments.json) {
@@ -1004,16 +1054,8 @@ int main(int argc, char** argv) {
             }
             return send(normalize_path(arguments.positional[0]), profile);
         }
-        if (command == "receive" && !arguments.positional.empty() && arguments.positional.size() <= 3) {
+        if (command == "receive" && arguments.positional.size() == 1) {
             if (arguments.json) throw std::invalid_argument("receive не принимает --json");
-            if (arguments.positional.size() >= 2) {
-                if (arguments.seconds_set) throw std::invalid_argument("длительность указана дважды");
-                arguments.seconds = parse_unsigned(arguments.positional[1], "длительность");
-            }
-            if (arguments.positional.size() == 3) {
-                if (arguments.gain_set) throw std::invalid_argument("усиление указано дважды");
-                arguments.gain = parse_double(arguments.positional[2], "усиление");
-            }
             return receive(normalize_path(arguments.positional[0]), arguments.seconds, arguments.gain,
                            profile, arguments.force);
         }

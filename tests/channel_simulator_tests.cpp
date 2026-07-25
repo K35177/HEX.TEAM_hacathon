@@ -1,5 +1,6 @@
 #include "acoustic/channel_simulator.hpp"
 #include "acoustic/framing.hpp"
+#include "acoustic/profile.hpp"
 
 #include <cassert>
 #include <cmath>
@@ -34,6 +35,24 @@ int main() {
     const auto clipped = acoustic::simulate_channel(clean, channel, &channel_metrics);
     assert(!clipped.empty());
     assert(channel_metrics.clipping_ratio > 0.0);
+
+    const auto turbo = acoustic::load_profile("turbo");
+    std::vector<std::uint8_t> turbo_payload(512);
+    for (std::size_t i = 0; i < turbo_payload.size(); ++i) {
+        turbo_payload[i] = static_cast<std::uint8_t>((i * 131U + 17U) & 0xFFU);
+    }
+    const auto turbo_clean = acoustic::create_audio_frame(
+        turbo_payload, turbo.modem, turbo.frame);
+    channel.snr_db = 12.0;
+    channel.sample_rate_scale = 1.002;
+    channel.signal_gain = 1.0;
+    channel.clipping_level = 1.0;
+    const auto turbo_impaired = acoustic::simulate_channel(turbo_clean, channel);
+    acoustic::ReceiverMetrics turbo_metrics;
+    assert(acoustic::decode_audio_frame(turbo_impaired, turbo.modem, turbo.frame,
+                                        &turbo_metrics) == turbo_payload);
+    assert(std::abs(turbo_metrics.clock_scale - channel.sample_rate_scale) < 0.001);
+    assert(turbo_metrics.mean_symbol_confidence > 0.45);
 
     std::cout << "channel_simulator_tests: OK\n";
 }

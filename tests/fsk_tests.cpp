@@ -34,6 +34,17 @@ int main() {
     robust.symbol_repetitions = 3;
     assert(acoustic::demodulate_bits(acoustic::modulate_bits(original, robust), robust) == original);
 
+    acoustic::FskConfig turbo;
+    turbo.symbol_rate = 800;
+    turbo.modulation_order = 16;
+    turbo.base_frequency = 1500.0;
+    turbo.frequency_spacing = 900.0;
+    const auto turbo_samples = acoustic::modulate_bits(original, turbo);
+    acoustic::FskMetrics turbo_metrics;
+    assert(acoustic::demodulate_bits(turbo_samples, turbo, &turbo_metrics) == original);
+    assert(turbo_metrics.symbol_count == original.size() * 2U);
+    assert(turbo_metrics.mean_confidence > 0.5);
+
     bool rejected = false;
     try {
         auto invalid = robust;
