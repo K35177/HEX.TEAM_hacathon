@@ -55,7 +55,7 @@ int self_test(const acoustic::TransferProfile& profile);
 
 void print_help() {
     std::cout
-        << "Acoustic File Transfer 0.6.0\n\n"
+        << "Acoustic File Transfer 0.6.1\n\n"
         << "Использование:\n"
         << "  acoustic-transfer                         # интерактивное меню\n"
         << "  acoustic-transfer menu\n"
@@ -71,7 +71,7 @@ void print_help() {
         << "  acoustic-transfer calibrate [--profile <имя>]\n"
         << "  acoustic-transfer check-audio\n"
         << "  acoustic-transfer self-test [--profile <имя>]\n\n"
-        << "Профили: turbo, fast, balanced (по умолчанию), robust. Усиление 0 включает auto.\n";
+        << "Профили: turbo, wideband, fast, balanced (по умолчанию), robust. Усиление 0 включает auto.\n";
 }
 
 std::string trim(std::string value) {
@@ -456,8 +456,8 @@ int decode(const std::filesystem::path& input, const std::filesystem::path& outp
     bool decoded = false;
     for (auto candidate : candidates) {
         candidate.modem.sample_rate = wav.sample_rate;
+        acoustic::ReceiverMetrics candidate_metrics;
         try {
-            acoustic::ReceiverMetrics candidate_metrics;
             const auto stream = acoustic::decode_audio_frame(
                 wav.samples, candidate.modem, candidate.frame, &candidate_metrics);
             auto candidate_file = acoustic::receive_transfer_stream(stream);
@@ -467,7 +467,20 @@ int decode(const std::filesystem::path& input, const std::filesystem::path& outp
             decoded = true;
             break;
         } catch (const std::exception& error) {
-            failures.push_back(candidate.name + ": " + error.what());
+            std::ostringstream detail;
+            detail << candidate.name << ": " << error.what();
+            if (candidate_metrics.chirp_correlation > 0.0) {
+                detail << std::fixed << std::setprecision(3)
+                       << " [chirp=" << candidate_metrics.chirp_correlation
+                       << ", clock=" << (candidate_metrics.clock_scale - 1.0) * 1'000'000.0
+                       << " ppm";
+                if (candidate_metrics.mean_symbol_confidence > 0.0) {
+                    detail << ", confidence="
+                           << candidate_metrics.mean_symbol_confidence * 100.0 << '%';
+                }
+                detail << ']';
+            }
+            failures.push_back(detail.str());
         } catch (...) {
             failures.push_back(candidate.name + ": неизвестная ошибка декодирования");
         }
@@ -476,6 +489,8 @@ int decode(const std::filesystem::path& input, const std::filesystem::path& outp
         std::ostringstream message;
         message << "не удалось распознать передачу ни в одном профиле";
         for (const auto& failure : failures) message << "\n  " << failure;
+        message << "\n  Совет: если использовался wideband, повторите передачу с turbo — "
+                   "он ограничен совместимой полосой до 8,2 кГц.";
         throw std::runtime_error(message.str());
     }
     if (detected_profile.name != profile.name) {
@@ -808,7 +823,8 @@ int calibrate(const acoustic::TransferProfile& profile) {
                   << "  Noise RMS:   " << metrics.noise_rms << '\n'
                   << "  Clipping:    " << metrics.clipping_ratio * 100.0 << "%\n"
                   << "  Рекомендация: проверьте выбранные устройства, разрешение микрофона, "
-                     "громкость и расстояние; затем повторите с robust.\n";
+                     "громкость и расстояние; затем повторите с "
+                  << (profile.name == "wideband" ? "turbo.\n" : "robust.\n");
         throw;
     }
     const auto restored = acoustic::receive_transfer_stream(decoded_stream);
@@ -860,7 +876,7 @@ std::filesystem::path prompt_input_file() {
 }
 
 std::string prompt_profile(std::string current) {
-    std::cout << "Профиль turbo/fast/balanced/robust [" << current << "]: " << std::flush;
+    std::cout << "Профиль turbo/wideband/fast/balanced/robust [" << current << "]: " << std::flush;
     std::string value;
     std::getline(std::cin, value);
     value = trim(std::move(value));

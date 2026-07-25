@@ -6,15 +6,21 @@
 #include <stdexcept>
 
 namespace acoustic {
+namespace {
+constexpr double pi = 3.14159265358979323846;
+}
 
 std::vector<float> simulate_channel(std::span<const float> input,
                                     const ChannelConfig& config,
                                     ChannelMetrics* metrics) {
     if (input.empty()) throw std::invalid_argument("channel input must not be empty");
-    if (!std::isfinite(config.signal_gain) || config.signal_gain < 0.0 ||
+    if (config.sample_rate == 0 || !std::isfinite(config.signal_gain) || config.signal_gain < 0.0 ||
         !std::isfinite(config.sample_rate_scale) || config.sample_rate_scale < 0.95 ||
         config.sample_rate_scale > 1.05 || !std::isfinite(config.clipping_level) ||
         config.clipping_level <= 0.0 || config.clipping_level > 1.0 ||
+        (std::isfinite(config.lowpass_cutoff_hz) &&
+         (config.lowpass_cutoff_hz <= 0.0 ||
+          config.lowpass_cutoff_hz >= config.sample_rate * 0.5)) ||
         (!std::isfinite(config.snr_db) && config.snr_db !=
             std::numeric_limits<double>::infinity())) {
         throw std::invalid_argument("invalid channel configuration");
@@ -31,6 +37,19 @@ std::vector<float> simulate_channel(std::span<const float> input,
         const double fraction = source - lower;
         scaled.push_back(static_cast<float>(config.signal_gain *
             (input[lower] * (1.0 - fraction) + input[upper] * fraction)));
+    }
+    if (std::isfinite(config.lowpass_cutoff_hz)) {
+        // Four inexpensive one-pole stages model the steep high-frequency
+        // roll-off observed in laptop microphones and OS voice processing.
+        const double alpha = 1.0 - std::exp(
+            -2.0 * pi * config.lowpass_cutoff_hz / config.sample_rate);
+        for (int stage = 0; stage < 4; ++stage) {
+            double state = 0.0;
+            for (float& sample : scaled) {
+                state += alpha * (sample - state);
+                sample = static_cast<float>(state);
+            }
+        }
     }
 
     double signal_energy = 0.0;

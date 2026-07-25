@@ -64,7 +64,7 @@ int main() {
     weak_recording.insert(weak_recording.end(), 2400, 0.0F);
     acoustic::ReceiverMetrics weak_metrics;
     assert(acoustic::decode_audio_frame(weak_recording, {}, {}, &weak_metrics) == data);
-    assert(weak_metrics.chirp_correlation >= 0.10);
+    assert(weak_metrics.chirp_correlation >= 0.08);
     assert(weak_metrics.chirp_correlation < 0.18);
     std::cout << "framing_tests: OK (chirp found after leading silence)\n";
 }

@@ -109,17 +109,31 @@ TransferProfile load_file(const std::filesystem::path& path, TransferProfile pro
 std::vector<TransferProfile> builtin_profiles() {
     TransferProfile turbo;
     turbo.name = "turbo";
-    turbo.description = "3200 bit/s for a quiet short-range wideband channel";
-    turbo.modem.symbol_rate = 800;
+    turbo.description = "1920 bit/s below 8.2 kHz for common speakers and microphones";
+    turbo.modem.symbol_rate = 480;
     turbo.modem.modulation_order = 16;
-    turbo.modem.base_frequency = 1500.0;
-    turbo.modem.frequency_spacing = 900.0;
+    turbo.modem.base_frequency = 960.0;
+    turbo.modem.frequency_spacing = 480.0;
     turbo.modem.amplitude = 0.70;
     turbo.block_size = 4096;
-    turbo.frame.chirp_duration_seconds = 0.20;
+    turbo.frame.chirp_duration_seconds = 0.22;
     turbo.frame.guard_duration_seconds = 0.03;
-    turbo.frame.chirp_start_frequency = 900.0;
-    turbo.frame.chirp_end_frequency = 19000.0;
+    turbo.frame.chirp_start_frequency = 700.0;
+    turbo.frame.chirp_end_frequency = 8500.0;
+
+    TransferProfile wideband;
+    wideband.name = "wideband";
+    wideband.description = "3200 bit/s for verified full-band hardware";
+    wideband.modem.symbol_rate = 800;
+    wideband.modem.modulation_order = 16;
+    wideband.modem.base_frequency = 1500.0;
+    wideband.modem.frequency_spacing = 900.0;
+    wideband.modem.amplitude = 0.70;
+    wideband.block_size = 4096;
+    wideband.frame.chirp_duration_seconds = 0.20;
+    wideband.frame.guard_duration_seconds = 0.03;
+    wideband.frame.chirp_start_frequency = 900.0;
+    wideband.frame.chirp_end_frequency = 19000.0;
 
     TransferProfile fast;
     fast.name = "fast";
@@ -151,7 +165,7 @@ std::vector<TransferProfile> builtin_profiles() {
     robust.frame.chirp_start_frequency = 700.0;
     robust.frame.chirp_end_frequency = 4200.0;
 
-    return {turbo, fast, balanced, robust};
+    return {turbo, wideband, fast, balanced, robust};
 }
 
 void validate_profile(const TransferProfile& profile) {

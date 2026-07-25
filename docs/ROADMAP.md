@@ -30,7 +30,7 @@ UI/CLI → transfer → packet → framing → modem → audio
 
 Цель: перестать оценивать качество только по `decoded/not decoded`.
 
-Статус 0.6.0: этап выполняется. Уже есть `ReceiverMetrics`, JSON для
+Статус 0.6.1: этап выполняется. Уже есть `ReceiverMetrics`, JSON для
 `estimate`/`benchmark`/`channel-test`, goodput/airtime/delivery efficiency,
 исправленные noise/signal windows и начальный channel simulator. Остались
 per-tone response, единый JSON для live/decode, BER/PER и явное управление

@@ -20,13 +20,15 @@ ROOT = Path(getattr(sys, "_MEIPASS", SOURCE_ROOT))
 
 PROFILE_LABELS = {
     "Турбо": "turbo",
+    "Ультра · wideband": "wideband",
     "Быстрый": "fast",
     "Сбалансированный": "balanced",
     "Устойчивый": "robust",
 }
 
 PROFILE_DESCRIPTIONS = {
-    "Турбо": "До 5,3× быстрее · короткая дистанция · проверено при SNR 12 dB",
+    "Турбо": "До 3,2× быстрее fast · совместимая полоса до 8,2 кГц",
+    "Ультра · wideband": "3200 бит/с · только после калибровки полосы до 15 кГц",
     "Быстрый": "Совместимый скоростной режим · обычные динамики и микрофоны",
     "Сбалансированный": "Рекомендуемый режим · баланс скорости и устойчивости",
     "Устойчивый": "Самый устойчивый режим · шумная комната · работает медленнее",
@@ -234,7 +236,7 @@ class AcousticUi(tk.Tk):
             textvariable=self.profile,
             values=tuple(PROFILE_LABELS),
             state="readonly",
-            width=18,
+            width=21,
         )
         self.profile_box.grid(row=1, column=0, padx=(0, 20), pady=(4, 0), sticky="w")
         self.profile_box.bind("<<ComboboxSelected>>", self._profile_changed)

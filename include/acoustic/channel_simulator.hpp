@@ -9,9 +9,11 @@
 namespace acoustic {
 
 struct ChannelConfig {
+    unsigned sample_rate = 48000;
     double signal_gain = 1.0;
     double snr_db = std::numeric_limits<double>::infinity();
     double sample_rate_scale = 1.0;
+    double lowpass_cutoff_hz = std::numeric_limits<double>::infinity();
     double clipping_level = 1.0;
     std::size_t leading_silence_samples{};
     std::size_t trailing_silence_samples{};

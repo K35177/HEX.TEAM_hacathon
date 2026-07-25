@@ -64,6 +64,71 @@ double normalized_correlation(std::span<const float> samples, std::size_t start,
     return denominator <= std::numeric_limits<double>::epsilon() ? -1.0 :
         std::abs(product) / denominator;
 }
+
+std::vector<float> resample_region(std::span<const float> samples, std::size_t start,
+                                   double scale, std::size_t output_samples) {
+    if (output_samples == 0) return {};
+    const double final_position = start + (output_samples - 1U) * scale;
+    if (scale <= 0.0 || final_position > samples.size() - 1U) {
+        throw std::runtime_error("audio frame payload is truncated");
+    }
+    std::vector<float> corrected;
+    corrected.reserve(output_samples);
+    for (std::size_t i = 0; i < output_samples; ++i) {
+        const double source = start + i * scale;
+        const auto lower = static_cast<std::size_t>(source);
+        const auto upper = std::min(lower + 1U, samples.size() - 1U);
+        const double fraction = source - lower;
+        corrected.push_back(static_cast<float>(
+            samples[lower] * (1.0 - fraction) + samples[upper] * fraction));
+    }
+    return corrected;
+}
+
+std::size_t sustained_activity_end(std::span<const float> samples,
+                                   std::size_t expected_end,
+                                   std::size_t nominal_frame_samples,
+                                   unsigned sample_rate,
+                                   double noise_rms) {
+    const auto window = std::max<std::size_t>(16U, sample_rate / 1000U);
+    const auto search_radius = std::max<std::size_t>(
+        static_cast<std::size_t>(sample_rate) * 2U, nominal_frame_samples / 20U);
+    const auto begin = expected_end > search_radius ? expected_end - search_radius : 0U;
+    const auto end = std::min(samples.size(), expected_end + search_radius);
+    if (end <= begin + window) return 0;
+    const double threshold = std::max(0.01, noise_rms * 4.0);
+    const auto minimum_run = std::max<std::size_t>(window, sample_rate / 100U);
+    std::size_t run_begin = 0;
+    bool in_run = false;
+    std::size_t best_end = 0;
+    std::size_t best_distance = std::numeric_limits<std::size_t>::max();
+    const auto consider_run = [&](std::size_t run_end) {
+        if (!in_run || run_end - run_begin < minimum_run) return;
+        const auto distance = run_end > expected_end ? run_end - expected_end :
+                                                        expected_end - run_end;
+        if (distance < best_distance) {
+            best_distance = distance;
+            best_end = run_end;
+        }
+    };
+    for (std::size_t offset = begin; offset + window <= end; offset += window) {
+        double energy = 0.0;
+        for (std::size_t i = 0; i < window; ++i) {
+            const double sample = samples[offset + i];
+            energy += sample * sample;
+        }
+        const bool active = std::sqrt(energy / window) > threshold;
+        if (active && !in_run) {
+            run_begin = offset;
+            in_run = true;
+        } else if (!active && in_run) {
+            consider_run(offset);
+            in_run = false;
+        }
+    }
+    if (in_run) consider_run(end);
+    return best_end;
+}
 }
 
 std::vector<float> create_audio_frame(std::span<const std::uint8_t> bytes,
@@ -218,42 +283,111 @@ std::vector<std::uint8_t> decode_audio_frame(std::span<const float> samples,
     // search has had a chance to recover it.  Payload CRC32 and the transfer
     // SHA-256 remain the hard acceptance gates, so a softer acquisition limit
     // improves real microphone tolerance without accepting a damaged file.
-    constexpr double minimum_chirp_correlation = 0.10;
+    constexpr double minimum_chirp_correlation = 0.08;
     if (best_correlation < minimum_chirp_correlation) {
         throw std::runtime_error("chirp preamble correlation is too weak (best=" +
                                  std::to_string(best_correlation) + ", minimum=" +
                                  std::to_string(minimum_chirp_correlation) + ')');
     }
-    const auto payload_start = chirp_start + static_cast<std::size_t>(std::llround(
-        (chirp_samples + guard_samples) * clock_scale));
-    if (payload_start >= samples.size()) throw std::runtime_error("audio frame has no payload");
-    std::vector<float> timing_corrected;
-    std::span<const float> payload_samples = samples.subspan(payload_start);
-    if (std::abs(clock_scale - 1.0) >= 0.0005) {
-        const auto corrected_size = static_cast<std::size_t>(payload_samples.size() / clock_scale);
-        timing_corrected.reserve(corrected_size);
-        for (std::size_t i = 0; i < corrected_size; ++i) {
-            const double source = i * clock_scale;
-            const auto lower = static_cast<std::size_t>(source);
-            const auto upper = std::min(lower + 1U, payload_samples.size() - 1U);
-            const double fraction = source - lower;
-            timing_corrected.push_back(static_cast<float>(
-                payload_samples[lower] * (1.0 - fraction) + payload_samples[upper] * fraction));
-        }
-        payload_samples = timing_corrected;
-    }
     const auto symbol_samples = samples_per_symbol(modem);
     const auto byte_symbols = 8U / bits_per_symbol(modem);
-    const auto available_symbols = payload_samples.size() / symbol_samples;
-    const auto complete_symbols = (available_symbols / byte_symbols) * byte_symbols;
-    const auto usable = complete_symbols * symbol_samples;
+    const auto header_samples = 4U * byte_symbols * symbol_samples;
+    const auto nominal_payload_start = chirp_start + static_cast<std::size_t>(std::llround(
+        (chirp_samples + guard_samples) * clock_scale));
+    if (nominal_payload_start >= samples.size()) {
+        throw std::runtime_error("audio frame has no payload");
+    }
+    struct HeaderCandidate {
+        std::size_t payload_start{};
+        std::size_t payload_size{};
+        std::size_t nominal_payload_samples{};
+        double clock_scale{};
+        double confidence{};
+        int offset{};
+    };
+    HeaderCandidate best_header;
+    bool header_found = false;
+    const auto consider_header = [&](int offset) {
+        if (offset < 0 && nominal_payload_start < static_cast<std::size_t>(-offset)) return;
+        const auto candidate_start = offset < 0 ?
+            nominal_payload_start - static_cast<std::size_t>(-offset) :
+            nominal_payload_start + static_cast<std::size_t>(offset);
+        if (candidate_start >= samples.size()) return;
+        try {
+            const auto header_audio = resample_region(samples, candidate_start, clock_scale,
+                                                      header_samples);
+            FskMetrics header_metrics;
+            const auto header = demodulate_bits(header_audio, modem, &header_metrics);
+            if (header.size() < 4) return;
+            const std::size_t candidate_size =
+                (static_cast<std::size_t>(header[0]) << 24U) |
+                (static_cast<std::size_t>(header[1]) << 16U) |
+                (static_cast<std::size_t>(header[2]) << 8U) | header[3];
+            const auto samples_per_byte = byte_symbols * symbol_samples;
+            if (candidate_size > (samples.size() - candidate_start) / samples_per_byte ||
+                candidate_size > (std::numeric_limits<std::size_t>::max() /
+                    samples_per_byte) - 4U) return;
+            const auto candidate_samples = (candidate_size + 4U) * samples_per_byte;
+            const auto expected_end = candidate_start + static_cast<std::size_t>(std::llround(
+                candidate_samples * clock_scale));
+            const auto activity_end = sustained_activity_end(
+                samples, expected_end, candidate_samples, modem.sample_rate, noise_rms);
+            double endpoint_scale = clock_scale;
+            bool endpoint_valid = false;
+            if (activity_end > candidate_start) {
+                const double measured_scale = (activity_end - candidate_start) /
+                    static_cast<double>(candidate_samples);
+                if (measured_scale >= 0.98 && measured_scale <= 1.02) {
+                    endpoint_scale = measured_scale;
+                    endpoint_valid = true;
+                }
+            }
+            const double candidate_score = header_metrics.mean_confidence +
+                (endpoint_valid ? 1.0 : 0.0) -
+                0.25 * std::abs(offset) / static_cast<double>(symbol_samples);
+            if (!header_found || candidate_score > best_header.confidence) {
+                best_header = {candidate_start, candidate_size, candidate_samples,
+                               endpoint_scale, candidate_score, offset};
+                header_found = true;
+            }
+        } catch (const std::exception&) {
+            // This timing hypothesis cannot contain a complete header.
+        }
+    };
+    const auto coarse_step = std::max<std::size_t>(1U, symbol_samples / 20U);
+    const auto timing_search = static_cast<int>(symbol_samples * 2U);
+    for (int offset = -timing_search; offset <= timing_search;
+         offset += static_cast<int>(coarse_step)) {
+        consider_header(offset);
+    }
+    if (header_found && coarse_step > 1U) {
+        const auto coarse_offset = best_header.offset;
+        for (int offset = coarse_offset - static_cast<int>(coarse_step) + 1;
+             offset < coarse_offset + static_cast<int>(coarse_step); ++offset) {
+            consider_header(offset);
+        }
+    }
+    if (!header_found) {
+        throw std::runtime_error("audio frame length header is not plausible");
+    }
+    const auto payload_start = best_header.payload_start;
+    const auto initial_payload_size = best_header.payload_size;
+    const auto nominal_payload_samples = best_header.nominal_payload_samples;
+    clock_scale = best_header.clock_scale;
+    if (metrics != nullptr) metrics->clock_scale = clock_scale;
+    const auto payload_samples = resample_region(samples, payload_start, clock_scale,
+                                                 nominal_payload_samples);
     FskMetrics fsk_metrics;
-    auto decoded = demodulate_bits(payload_samples.first(usable), modem, &fsk_metrics);
+    auto decoded = demodulate_bits(payload_samples, modem, &fsk_metrics);
     if (decoded.size() < 4) throw std::runtime_error("audio frame length is missing");
     const std::size_t payload_size = (static_cast<std::size_t>(decoded[0]) << 24U) |
         (static_cast<std::size_t>(decoded[1]) << 16U) |
         (static_cast<std::size_t>(decoded[2]) << 8U) | decoded[3];
-    if (payload_size > decoded.size() - 4U) throw std::runtime_error("audio frame payload is truncated");
+    if (payload_size != initial_payload_size || payload_size > decoded.size() - 4U) {
+        throw std::runtime_error("audio frame length changed after clock refinement (initial=" +
+                                 std::to_string(initial_payload_size) + ", refined=" +
+                                 std::to_string(payload_size) + ')');
+    }
     if (metrics != nullptr) {
         double signal_energy = 0.0;
         const auto observed_chirp_samples = std::min(
