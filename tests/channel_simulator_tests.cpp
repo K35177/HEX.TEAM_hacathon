@@ -58,5 +58,17 @@ int main() {
     assert(std::abs(turbo_metrics.clock_scale - channel.sample_rate_scale) < 0.00015);
     assert(turbo_metrics.mean_symbol_confidence > 0.45);
 
+    // At low SNR the noisy tail is not a trustworthy clock reference. The
+    // receiver must retain the correct chirp estimate instead of fitting its
+    // clock to a random noise burst near the expected endpoint.
+    channel.snr_db = 12.0;
+    channel.sample_rate_scale = 1.002;
+    channel.random_seed = 0x48455845U;
+    const auto noisy_turbo = acoustic::simulate_channel(turbo_clean, channel);
+    acoustic::ReceiverMetrics noisy_metrics;
+    assert(acoustic::decode_audio_frame(noisy_turbo, turbo.modem, turbo.frame,
+                                        &noisy_metrics) == turbo_payload);
+    assert(std::abs(noisy_metrics.clock_scale - channel.sample_rate_scale) < 0.00015);
+
     std::cout << "channel_simulator_tests: OK\n";
 }

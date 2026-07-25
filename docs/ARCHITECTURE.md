@@ -5,7 +5,7 @@
 ```text
 CLI / Tkinter UI
        ↓
-Transfer metadata → packets/CRC32 → framing/chirp → FSK → WAV/audio backend
+Transfer metadata → packets/CRC32 → frame v2/FEC → chirp/FSK → WAV/audio backend
        ↑                                                        ↓
 SHA-256/file      ← packet assembly ← frame detection ← FSK ← microphone/WAV
 ```
@@ -16,15 +16,15 @@ SHA-256/file      ← packet assembly ← frame detection ← FSK ← microphone
 - **Profiles** загружает `config/*.conf` в существующие конфигурации FSK/frame.
 - **Transfer layer** добавляет имя, размер и SHA-256, делит файл на блоки.
 - **Packet protocol** нумерует блоки и защищает каждый пакет CRC32.
-- **Framing** добавляет chirp, защитный интервал и длину потока.
+- **Framing** добавляет chirp, проверяемый заголовок, RS FEC и interleaving.
 - **FSK modem** преобразует символы в частоты и обратно.
 - **Audio layer** работает с PCM WAV и платформенным аудио.
 
 ## Текущая операционная модель
 
-Версия 0.6.1 работает как half-duplex one-shot transfer:
+Версия 0.7.0 работает как half-duplex one-shot transfer:
 
-1. профиль вручную выбирается на обоих устройствах;
+1. профиль задаётся sender; receiver сначала пробует выбранный, затем остальные;
 2. sender формирует весь transfer stream и один WAV;
 3. receiver получает PCM блоками и завершает запись после пяти секунд тишины,
    наступивших после обнаружения сигнала;
@@ -33,8 +33,8 @@ SHA-256/file      ← packet assembly ← frame detection ← FSK ← microphone
    ещё хранится целиком;
 6. при любой неисправимой ошибке вся попытка отклоняется.
 
-Это важная граница текущей реализации, а не целевая модель. Protocol v2 должен
-добавить independently framed packets и streaming state machine внутри
+Это важная граница текущей реализации, а не целевая модель. Следующая версия
+transport должна добавить independently framed packets и streaming state machine внутри
 существующих слоёв. План описан в [ROADMAP.md](ROADMAP.md).
 
 ## Аудиобэкенды
@@ -57,8 +57,8 @@ backend ещё должны пройти end-to-end hardware matrix; налич�
 2. находит участок сигнала по RMS;
 3. уточняет начало нормализованной корреляцией;
 4. совместно ищет точное начало и растяжение/сжатие времени в диапазоне ±2%;
-5. уточняет clock scale по фактическому концу длинного кадра и служебному полю
-   длины, не полагаясь только на wideband chirp;
+5. при достаточном отношении сигнал/шум уточняет clock scale по фактическому
+   концу длинного кадра; шумный хвост для этого не используется;
 6. пересэмплирует payload к номинальным границам символов;
 7. определяет FSK-тон с окном Hann и небольшим поиском частотного смещения.
 
@@ -69,8 +69,19 @@ start/clock scale. Для искажённого chirp разрешён мягк
 подтверждены AWGN, clipping и clock scale до 4000 ppm; continuous tracking пока
 отсутствует.
 
-Четыре байта после chirp задают длину transfer stream, поэтому хвост записи
-может содержать тишину.
+## Защищённый audio frame v2
+
+После chirp и guard передаются:
+
+1. внешняя 4-байтовая длина для совместимости с frame v1;
+2. семь копий `HXF2 | payload_size | CRC32` по 12 байт;
+3. codewords RS(255,191), переданные column-major для interleaving.
+
+Каждый codeword содержит 191 байт данных и 64 байта parity и исправляет до
+32 произвольных ошибочных байтов. Приёмник считает исправленные codewords/bytes,
+после чего packet CRC32 и SHA-256 всего файла остаются обязательными проверками.
+Frame v1 без FEC продолжает читаться через legacy path; для старой частотной
+сетки используется автоматически проверяемый профиль `turbo-v1`.
 
 Автоматизированно проверено синтетическое рассогласование 0,8%. Это не означает
 гарантированную коррекцию всех записей с рассогласованием до 2%.

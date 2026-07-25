@@ -55,7 +55,7 @@ int self_test(const acoustic::TransferProfile& profile);
 
 void print_help() {
     std::cout
-        << "Acoustic File Transfer 0.6.1\n\n"
+        << "Acoustic File Transfer 0.7.0\n\n"
         << "Использование:\n"
         << "  acoustic-transfer                         # интерактивное меню\n"
         << "  acoustic-transfer menu\n"
@@ -317,7 +317,8 @@ FileEstimate estimate_file(const std::filesystem::path& input,
                                                        profile.block_size,
                                                        input.filename().string().size());
     const auto symbols_per_byte = 8U / acoustic::bits_per_symbol(profile.modem);
-    const long double modem_samples = static_cast<long double>(transfer.stream_bytes + 4U) *
+    const auto protected_bytes = acoustic::protected_frame_payload_bytes(transfer.stream_bytes);
+    const long double modem_samples = static_cast<long double>(protected_bytes + 4U) *
         symbols_per_byte * acoustic::samples_per_symbol(profile.modem);
     const long double prefix_samples =
         (profile.frame.chirp_duration_seconds + profile.frame.guard_duration_seconds) *
@@ -334,7 +335,7 @@ FileEstimate estimate_file(const std::filesystem::path& input,
     result.duration_seconds = result.audio_samples / static_cast<double>(profile.modem.sample_rate);
     result.wav_bytes = 44ULL + result.audio_samples * 2ULL;
     result.working_memory_bytes = result.audio_samples * (sizeof(float) + sizeof(std::int16_t)) +
-        transfer.stream_bytes + file_bytes;
+        protected_bytes + transfer.stream_bytes + file_bytes;
     return result;
 }
 
@@ -454,6 +455,7 @@ int decode(const std::filesystem::path& input, const std::filesystem::path& outp
     acoustic::TransferProfile detected_profile = profile;
     std::vector<std::string> failures;
     bool decoded = false;
+    bool damaged_legacy_turbo = false;
     for (auto candidate : candidates) {
         candidate.modem.sample_rate = wav.sample_rate;
         acoustic::ReceiverMetrics candidate_metrics;
@@ -467,6 +469,9 @@ int decode(const std::filesystem::path& input, const std::filesystem::path& outp
             decoded = true;
             break;
         } catch (const std::exception& error) {
+            if (candidate.name == "turbo-v1" && candidate_metrics.chirp_correlation >= 0.20) {
+                damaged_legacy_turbo = true;
+            }
             std::ostringstream detail;
             detail << candidate.name << ": " << error.what();
             if (candidate_metrics.chirp_correlation > 0.0) {
@@ -489,8 +494,14 @@ int decode(const std::filesystem::path& input, const std::filesystem::path& outp
         std::ostringstream message;
         message << "не удалось распознать передачу ни в одном профиле";
         for (const auto& failure : failures) message << "\n  " << failure;
-        message << "\n  Совет: если использовался wideband, повторите передачу с turbo — "
-                   "он ограничен совместимой полосой до 8,2 кГц.";
+        if (damaged_legacy_turbo) {
+            message << "\n  Запись уверенно найдена как turbo-v1, но старый формат не содержит FEC: "
+                       "повреждённые символы восстановить нельзя. Повторите передачу новой версией "
+                       "с профилем turbo; вручную перебирать профили не требуется.";
+        } else {
+            message << "\n  Совет: используйте новый turbo (1,2–6,0 кГц с FEC); "
+                       "приёмник определяет профиль автоматически.";
+        }
         throw std::runtime_error(message.str());
     }
     if (detected_profile.name != profile.name) {
@@ -520,7 +531,9 @@ int decode(const std::filesystem::path& input, const std::filesystem::path& outp
               << ", clock=" << (metrics.clock_scale - 1.0) * 1'000'000.0 << " ppm"
               << ", confidence=" << metrics.mean_symbol_confidence * 100.0 << "%"
               << ", freq-offset=" << metrics.estimated_frequency_offset_hz << " Hz"
-              << ", clipping=" << metrics.clipping_ratio * 100.0 << "%\n";
+              << ", clipping=" << metrics.clipping_ratio * 100.0 << "%"
+              << ", FEC=" << metrics.corrected_bytes << " bytes/"
+              << metrics.corrected_codewords << " blocks\n";
     return 0;
 }
 

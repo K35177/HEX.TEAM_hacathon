@@ -1,15 +1,153 @@
 #include "acoustic/framing.hpp"
 
+#include "acoustic/crc32.hpp"
+#include "acoustic/fec.hpp"
+
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <functional>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 #include <utility>
 
 namespace acoustic {
 namespace {
 constexpr double pi = 3.14159265358979323846;
+constexpr std::array<std::uint8_t, 4> protected_magic{'H', 'X', 'F', '2'};
+constexpr std::size_t protected_header_bytes = 12;
+constexpr std::size_t protected_header_copies = 7;
+constexpr std::size_t protected_headers_bytes =
+    protected_header_bytes * protected_header_copies;
+
+void append_u32(std::vector<std::uint8_t>& output, std::uint32_t value) {
+    output.push_back(static_cast<std::uint8_t>(value >> 24U));
+    output.push_back(static_cast<std::uint8_t>(value >> 16U));
+    output.push_back(static_cast<std::uint8_t>(value >> 8U));
+    output.push_back(static_cast<std::uint8_t>(value));
+}
+
+std::uint32_t read_u32(std::span<const std::uint8_t> input, std::size_t offset) {
+    return (static_cast<std::uint32_t>(input[offset]) << 24U) |
+           (static_cast<std::uint32_t>(input[offset + 1U]) << 16U) |
+           (static_cast<std::uint32_t>(input[offset + 2U]) << 8U) |
+           input[offset + 3U];
+}
+
+bool valid_protected_header(std::span<const std::uint8_t> header) {
+    return header.size() == protected_header_bytes &&
+           std::equal(protected_magic.begin(), protected_magic.end(), header.begin()) &&
+           read_u32(header, 8) == crc32(header.first(8));
+}
+
+unsigned protected_magic_bit_errors(std::span<const std::uint8_t> header) {
+    unsigned errors = 0;
+    for (std::size_t i = 0; i < protected_magic.size(); ++i) {
+        errors += std::popcount(static_cast<unsigned>(header[i] ^ protected_magic[i]));
+    }
+    return errors;
+}
+
+std::optional<std::size_t> recover_protected_payload_size(
+    std::span<const std::uint8_t> encoded) {
+    if (encoded.size() < protected_headers_bytes) return std::nullopt;
+    std::vector<std::uint32_t> valid_sizes;
+    for (std::size_t copy = 0; copy < protected_header_copies; ++copy) {
+        const auto header = encoded.subspan(copy * protected_header_bytes,
+                                            protected_header_bytes);
+        if (valid_protected_header(header)) valid_sizes.push_back(read_u32(header, 4));
+    }
+    if (!valid_sizes.empty()) {
+        std::sort(valid_sizes.begin(), valid_sizes.end());
+        return valid_sizes[valid_sizes.size() / 2U];
+    }
+    std::array<std::uint8_t, protected_header_bytes> majority{};
+    for (std::size_t byte = 0; byte < majority.size(); ++byte) {
+        for (unsigned bit = 0; bit < 8; ++bit) {
+            std::size_t votes = 0;
+            for (std::size_t copy = 0; copy < protected_header_copies; ++copy) {
+                votes += (encoded[copy * protected_header_bytes + byte] >> bit) & 1U;
+            }
+            if (votes > protected_header_copies / 2U) {
+                majority[byte] |= static_cast<std::uint8_t>(1U << bit);
+            }
+        }
+    }
+    if (valid_protected_header(majority)) return read_u32(majority, 4);
+    // At the acquisition limit one CRC bit can remain wrong even though all
+    // 32 magic bits and the repeated length agree. The RS payload plus packet
+    // CRC32 and whole-file SHA-256 are still mandatory acceptance gates.
+    if (protected_magic_bit_errors(majority) <= 4U) {
+        return read_u32(majority, 4);
+    }
+    return std::nullopt;
+}
+
+std::vector<std::uint8_t> protect_payload(std::span<const std::uint8_t> payload) {
+    if (payload.size() > std::numeric_limits<std::uint32_t>::max()) {
+        throw std::invalid_argument("audio frame payload is too large");
+    }
+    std::vector<std::uint8_t> header(protected_magic.begin(), protected_magic.end());
+    append_u32(header, static_cast<std::uint32_t>(payload.size()));
+    append_u32(header, crc32(header));
+
+    std::vector<std::uint8_t> result;
+    result.reserve(protected_frame_payload_bytes(payload.size()));
+    for (std::size_t copy = 0; copy < protected_header_copies; ++copy) {
+        result.insert(result.end(), header.begin(), header.end());
+    }
+    const auto block_count = std::max<std::size_t>(
+        1U, (payload.size() + kFecDataBytes - 1U) / kFecDataBytes);
+    std::vector<std::array<std::uint8_t, kFecCodewordBytes>> codewords;
+    codewords.reserve(block_count);
+    for (std::size_t block = 0; block < block_count; ++block) {
+        const auto begin = std::min(block * kFecDataBytes, payload.size());
+        const auto end = std::min(begin + kFecDataBytes, payload.size());
+        codewords.push_back(encode_fec_block(payload.subspan(begin, end - begin)));
+    }
+    // Column-major transmission interleaves codewords. A short click or fade
+    // becomes one correctable byte in many blocks instead of destroying one.
+    for (std::size_t column = 0; column < kFecCodewordBytes; ++column) {
+        for (const auto& codeword : codewords) result.push_back(codeword[column]);
+    }
+    return result;
+}
+
+std::vector<std::uint8_t> unprotect_payload(std::span<const std::uint8_t> encoded,
+                                            std::optional<std::size_t> expected_payload_size,
+                                            std::size_t* corrected_codewords,
+                                            std::size_t* corrected_bytes) {
+    const auto payload_size = expected_payload_size.has_value() ? expected_payload_size :
+        recover_protected_payload_size(encoded);
+    if (!payload_size.has_value()) throw std::runtime_error("protected frame header is damaged");
+    const auto expected_size = protected_frame_payload_bytes(*payload_size);
+    if (encoded.size() < expected_size) throw std::runtime_error("protected audio frame is truncated");
+    const auto block_count = std::max<std::size_t>(
+        1U, (*payload_size + kFecDataBytes - 1U) / kFecDataBytes);
+    std::vector<std::array<std::uint8_t, kFecCodewordBytes>> codewords(block_count);
+    auto body = encoded.subspan(protected_headers_bytes, block_count * kFecCodewordBytes);
+    for (std::size_t column = 0; column < kFecCodewordBytes; ++column) {
+        for (std::size_t block = 0; block < block_count; ++block) {
+            codewords[block][column] = body[column * block_count + block];
+        }
+    }
+    std::vector<std::uint8_t> result;
+    result.reserve(block_count * kFecDataBytes);
+    std::size_t repaired_words = 0;
+    std::size_t repaired_bytes = 0;
+    for (const auto& codeword : codewords) {
+        std::size_t errors = 0;
+        const auto data = decode_fec_block(codeword, &errors);
+        result.insert(result.end(), data.begin(), data.end());
+        repaired_words += errors != 0 ? 1U : 0U;
+        repaired_bytes += errors;
+    }
+    result.resize(*payload_size);
+    if (corrected_codewords != nullptr) *corrected_codewords = repaired_words;
+    if (corrected_bytes != nullptr) *corrected_bytes = repaired_bytes;
+    return result;
+}
 
 void validate_frame(const FskConfig& modem, const FrameConfig& frame) {
     (void)samples_per_symbol(modem);
@@ -131,6 +269,16 @@ std::size_t sustained_activity_end(std::span<const float> samples,
 }
 }
 
+std::size_t protected_frame_payload_bytes(std::size_t payload_size) {
+    const auto block_count = std::max<std::size_t>(
+        1U, (payload_size + kFecDataBytes - 1U) / kFecDataBytes);
+    if (block_count > (std::numeric_limits<std::size_t>::max() - protected_headers_bytes) /
+                          kFecCodewordBytes) {
+        throw std::invalid_argument("protected audio frame size overflows");
+    }
+    return protected_headers_bytes + block_count * kFecCodewordBytes;
+}
+
 std::vector<float> create_audio_frame(std::span<const std::uint8_t> bytes,
                                       const FskConfig& modem,
                                       const FrameConfig& frame) {
@@ -139,18 +287,22 @@ std::vector<float> create_audio_frame(std::span<const std::uint8_t> bytes,
     const auto guard_samples = static_cast<std::size_t>(frame.guard_duration_seconds * modem.sample_rate);
     std::vector<float> output;
     const auto symbols_per_byte = 8U / bits_per_symbol(modem);
+    const auto protected_payload = protect_payload(bytes);
     output.reserve(chirp_samples + guard_samples +
-                   (bytes.size() + 4U) * symbols_per_byte * samples_per_symbol(modem));
+                   (protected_payload.size() + 4U) * symbols_per_byte *
+                       samples_per_symbol(modem));
     const auto chirp = create_chirp(chirp_samples, modem, frame);
     output.insert(output.end(), chirp.begin(), chirp.end());
     output.insert(output.end(), guard_samples, 0.0F);
-    if (bytes.size() > 0xFFFFFFFFULL) throw std::invalid_argument("audio frame payload is too large");
+    if (protected_payload.size() > 0xFFFFFFFFULL) {
+        throw std::invalid_argument("protected audio frame payload is too large");
+    }
     std::vector<std::uint8_t> framed_bytes{
-        static_cast<std::uint8_t>(bytes.size() >> 24U),
-        static_cast<std::uint8_t>(bytes.size() >> 16U),
-        static_cast<std::uint8_t>(bytes.size() >> 8U),
-        static_cast<std::uint8_t>(bytes.size())};
-    framed_bytes.insert(framed_bytes.end(), bytes.begin(), bytes.end());
+        static_cast<std::uint8_t>(protected_payload.size() >> 24U),
+        static_cast<std::uint8_t>(protected_payload.size() >> 16U),
+        static_cast<std::uint8_t>(protected_payload.size() >> 8U),
+        static_cast<std::uint8_t>(protected_payload.size())};
+    framed_bytes.insert(framed_bytes.end(), protected_payload.begin(), protected_payload.end());
     const auto payload = modulate_bits(framed_bytes, modem);
     output.insert(output.end(), payload.begin(), payload.end());
     return output;
@@ -205,9 +357,21 @@ std::vector<std::uint8_t> decode_audio_frame(std::span<const float> samples,
     // of assuming the first loud window is the modem preamble.
     constexpr std::size_t maximum_onsets = 32;
     if (energy_onsets.size() > maximum_onsets) {
-        std::partial_sort(energy_onsets.begin(), energy_onsets.begin() + maximum_onsets,
+        constexpr std::size_t early_onsets = 8;
+        std::vector<std::pair<double, std::size_t>> selected(
+            energy_onsets.begin(), energy_onsets.begin() + early_onsets);
+        const auto strongest_count = maximum_onsets - early_onsets;
+        std::partial_sort(energy_onsets.begin(), energy_onsets.begin() + strongest_count,
                           energy_onsets.end(), std::greater<>());
-        energy_onsets.resize(maximum_onsets);
+        for (std::size_t i = 0; i < strongest_count && selected.size() < maximum_onsets; ++i) {
+            const auto onset = energy_onsets[i];
+            if (std::none_of(selected.begin(), selected.end(), [&](const auto& existing) {
+                    return existing.second == onset.second;
+                })) {
+                selected.push_back(onset);
+            }
+        }
+        energy_onsets = std::move(selected);
     }
     const auto reference = create_chirp(chirp_samples, modem, frame);
     std::size_t approximate_start = energy_onsets.front().second;
@@ -289,9 +453,26 @@ std::vector<std::uint8_t> decode_audio_frame(std::span<const float> samples,
                                  std::to_string(best_correlation) + ", minimum=" +
                                  std::to_string(minimum_chirp_correlation) + ')');
     }
+    double acquisition_signal_energy = 0.0;
+    const auto acquisition_samples = std::min(
+        samples.size() - chirp_start,
+        static_cast<std::size_t>(std::llround(chirp_samples * clock_scale)));
+    for (std::size_t i = 0; i < acquisition_samples; ++i) {
+        const double sample = samples[chirp_start + i];
+        acquisition_signal_energy += sample * sample;
+    }
+    const double acquisition_signal_rms = acquisition_samples == 0 ? 0.0 :
+        std::sqrt(acquisition_signal_energy / acquisition_samples);
+    const bool endpoint_is_measurable =
+        noise_rms <= std::numeric_limits<double>::epsilon() ||
+        acquisition_signal_rms >= noise_rms * 6.0;
+    if (metrics != nullptr) metrics->signal_rms = acquisition_signal_rms;
     const auto symbol_samples = samples_per_symbol(modem);
     const auto byte_symbols = 8U / bits_per_symbol(modem);
-    const auto header_samples = 4U * byte_symbols * symbol_samples;
+    const auto protected_probe_bytes = 4U + protected_headers_bytes;
+    const auto legacy_header_samples = 4U * byte_symbols * symbol_samples;
+    const auto protected_header_samples =
+        protected_probe_bytes * byte_symbols * symbol_samples;
     const auto nominal_payload_start = chirp_start + static_cast<std::size_t>(std::llround(
         (chirp_samples + guard_samples) * clock_scale));
     if (nominal_payload_start >= samples.size()) {
@@ -304,25 +485,43 @@ std::vector<std::uint8_t> decode_audio_frame(std::span<const float> samples,
         double clock_scale{};
         double confidence{};
         int offset{};
+        bool protected_frame{};
+        std::size_t original_payload_size{};
     };
     HeaderCandidate best_header;
+    std::vector<HeaderCandidate> quick_headers;
     bool header_found = false;
-    const auto consider_header = [&](int offset) {
+    const auto consider_header = [&](int offset, bool inspect_protected) {
         if (offset < 0 && nominal_payload_start < static_cast<std::size_t>(-offset)) return;
         const auto candidate_start = offset < 0 ?
             nominal_payload_start - static_cast<std::size_t>(-offset) :
             nominal_payload_start + static_cast<std::size_t>(offset);
         if (candidate_start >= samples.size()) return;
         try {
-            const auto header_audio = resample_region(samples, candidate_start, clock_scale,
-                                                      header_samples);
+            const auto header_audio = resample_region(
+                samples, candidate_start, clock_scale,
+                inspect_protected ? protected_header_samples : legacy_header_samples);
             FskMetrics header_metrics;
             const auto header = demodulate_bits(header_audio, modem, &header_metrics);
             if (header.size() < 4) return;
-            const std::size_t candidate_size =
-                (static_cast<std::size_t>(header[0]) << 24U) |
-                (static_cast<std::size_t>(header[1]) << 16U) |
-                (static_cast<std::size_t>(header[2]) << 8U) | header[3];
+            bool protected_frame = false;
+            std::size_t candidate_size = 0;
+            std::size_t original_payload_size = 0;
+            if (inspect_protected && header.size() >= protected_probe_bytes) {
+                if (const auto original_size = recover_protected_payload_size(
+                        std::span<const std::uint8_t>(header).subspan(4));
+                    original_size.has_value()) {
+                    candidate_size = protected_frame_payload_bytes(*original_size);
+                    original_payload_size = *original_size;
+                    protected_frame = true;
+                }
+            }
+            if (!protected_frame) {
+                candidate_size =
+                    (static_cast<std::size_t>(header[0]) << 24U) |
+                    (static_cast<std::size_t>(header[1]) << 16U) |
+                    (static_cast<std::size_t>(header[2]) << 8U) | header[3];
+            }
             const auto samples_per_byte = byte_symbols * symbol_samples;
             if (candidate_size > (samples.size() - candidate_start) / samples_per_byte ||
                 candidate_size > (std::numeric_limits<std::size_t>::max() /
@@ -330,8 +529,8 @@ std::vector<std::uint8_t> decode_audio_frame(std::span<const float> samples,
             const auto candidate_samples = (candidate_size + 4U) * samples_per_byte;
             const auto expected_end = candidate_start + static_cast<std::size_t>(std::llround(
                 candidate_samples * clock_scale));
-            const auto activity_end = sustained_activity_end(
-                samples, expected_end, candidate_samples, modem.sample_rate, noise_rms);
+            const auto activity_end = endpoint_is_measurable ? sustained_activity_end(
+                samples, expected_end, candidate_samples, modem.sample_rate, noise_rms) : 0U;
             double endpoint_scale = clock_scale;
             bool endpoint_valid = false;
             if (activity_end > candidate_start) {
@@ -343,12 +542,17 @@ std::vector<std::uint8_t> decode_audio_frame(std::span<const float> samples,
                 }
             }
             const double candidate_score = header_metrics.mean_confidence +
-                (endpoint_valid ? 1.0 : 0.0) -
+                (endpoint_valid ? 1.0 : 0.0) + (protected_frame ? 2.0 : 0.0) -
                 0.25 * std::abs(offset) / static_cast<double>(symbol_samples);
             if (!header_found || candidate_score > best_header.confidence) {
                 best_header = {candidate_start, candidate_size, candidate_samples,
-                               endpoint_scale, candidate_score, offset};
+                               endpoint_scale, candidate_score, offset, protected_frame,
+                               original_payload_size};
                 header_found = true;
+            }
+            if (!inspect_protected) {
+                quick_headers.push_back({candidate_start, candidate_size, candidate_samples,
+                                         endpoint_scale, candidate_score, offset, false, 0});
             }
         } catch (const std::exception&) {
             // This timing hypothesis cannot contain a complete header.
@@ -358,13 +562,43 @@ std::vector<std::uint8_t> decode_audio_frame(std::span<const float> samples,
     const auto timing_search = static_cast<int>(symbol_samples * 2U);
     for (int offset = -timing_search; offset <= timing_search;
          offset += static_cast<int>(coarse_step)) {
-        consider_header(offset);
+        consider_header(offset, false);
     }
     if (header_found && coarse_step > 1U) {
         const auto coarse_offset = best_header.offset;
         for (int offset = coarse_offset - static_cast<int>(coarse_step) + 1;
              offset < coarse_offset + static_cast<int>(coarse_step); ++offset) {
-            consider_header(offset);
+            consider_header(offset, false);
+        }
+    }
+    // The cheap four-byte pass gives an accurate timing estimate. Probe the
+    // repeated v2 header only in its immediate neighbourhood; decoding it at
+    // every timing hypothesis made automatic profile detection unnecessarily
+    // slow on long real-world recordings.
+    if (header_found) {
+        std::sort(quick_headers.begin(), quick_headers.end(),
+                  [](const HeaderCandidate& left, const HeaderCandidate& right) {
+                      return left.confidence > right.confidence;
+                  });
+        std::vector<int> probed_offsets;
+        for (const auto& quick : quick_headers) {
+            if (probed_offsets.size() >= 3U || best_header.protected_frame) break;
+            if (std::any_of(probed_offsets.begin(), probed_offsets.end(), [&](int used) {
+                    return std::abs(used - quick.offset) <= 8;
+                })) {
+                continue;
+            }
+            probed_offsets.push_back(quick.offset);
+            for (int offset = quick.offset - 4; offset <= quick.offset + 4; ++offset) {
+                consider_header(offset, true);
+            }
+        }
+        if (!best_header.protected_frame && modem.modulation_order <= 4U) {
+            for (int offset = -timing_search; offset <= timing_search;
+                 offset += static_cast<int>(coarse_step)) {
+                consider_header(offset, true);
+                if (best_header.protected_frame) break;
+            }
         }
     }
     if (!header_found) {
@@ -380,13 +614,36 @@ std::vector<std::uint8_t> decode_audio_frame(std::span<const float> samples,
     FskMetrics fsk_metrics;
     auto decoded = demodulate_bits(payload_samples, modem, &fsk_metrics);
     if (decoded.size() < 4) throw std::runtime_error("audio frame length is missing");
-    const std::size_t payload_size = (static_cast<std::size_t>(decoded[0]) << 24U) |
+    const std::size_t outer_payload_size = (static_cast<std::size_t>(decoded[0]) << 24U) |
         (static_cast<std::size_t>(decoded[1]) << 16U) |
         (static_cast<std::size_t>(decoded[2]) << 8U) | decoded[3];
-    if (payload_size != initial_payload_size || payload_size > decoded.size() - 4U) {
+    if (!best_header.protected_frame &&
+        (outer_payload_size != initial_payload_size ||
+         outer_payload_size > decoded.size() - 4U)) {
         throw std::runtime_error("audio frame length changed after clock refinement (initial=" +
                                  std::to_string(initial_payload_size) + ", refined=" +
-                                 std::to_string(payload_size) + ')');
+                                 std::to_string(outer_payload_size) + ')');
+    }
+    std::size_t corrected_codewords = 0;
+    std::size_t corrected_bytes = 0;
+    std::vector<std::uint8_t> payload;
+    if (metrics != nullptr) {
+        metrics->mean_symbol_confidence = fsk_metrics.mean_confidence;
+        metrics->minimum_symbol_confidence = fsk_metrics.minimum_confidence;
+        metrics->estimated_frequency_offset_hz = fsk_metrics.estimated_frequency_offset_hz;
+        metrics->decoded_symbols = fsk_metrics.symbol_count;
+    }
+    if (best_header.protected_frame) {
+        if (decoded.size() < 4U + initial_payload_size) {
+            throw std::runtime_error("protected audio frame payload is truncated");
+        }
+        payload = unprotect_payload(
+            std::span<const std::uint8_t>(decoded).subspan(4U, initial_payload_size),
+            best_header.original_payload_size,
+            &corrected_codewords, &corrected_bytes);
+    } else {
+        payload.assign(decoded.begin() + 4U,
+                       decoded.begin() + 4U + outer_payload_size);
     }
     if (metrics != nullptr) {
         double signal_energy = 0.0;
@@ -406,9 +663,11 @@ std::vector<std::uint8_t> decode_audio_frame(std::span<const float> samples,
         metrics->minimum_symbol_confidence = fsk_metrics.minimum_confidence;
         metrics->estimated_frequency_offset_hz = fsk_metrics.estimated_frequency_offset_hz;
         metrics->decoded_symbols = fsk_metrics.symbol_count;
-        metrics->decoded_bytes = payload_size;
+        metrics->decoded_bytes = payload.size();
+        metrics->corrected_codewords = corrected_codewords;
+        metrics->corrected_bytes = corrected_bytes;
     }
-    return {decoded.begin() + 4, decoded.begin() + 4 + payload_size};
+    return payload;
 }
 
 }  // namespace acoustic

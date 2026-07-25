@@ -5,16 +5,19 @@
 
 int main() {
     const auto turbo = acoustic::load_profile("turbo");
+    const auto turbo_v1 = acoustic::load_profile("turbo-v1");
     const auto wideband = acoustic::load_profile("wideband");
     const auto fast = acoustic::load_profile("fast");
     const auto balanced = acoustic::load_profile("balanced");
     const auto robust = acoustic::load_profile("robust");
-    assert(turbo.modem.modulation_order == 16);
-    assert(turbo.modem.symbol_rate == 480);
-    assert(turbo.modem.base_frequency == 960.0);
-    assert(turbo.modem.base_frequency + 15.0 * turbo.modem.frequency_spacing == 8160.0);
+    assert(turbo.modem.modulation_order == 4);
+    assert(turbo.modem.symbol_rate == 800);
+    assert(turbo.modem.base_frequency == 1200.0);
+    assert(turbo.modem.base_frequency + 3.0 * turbo.modem.frequency_spacing == 6000.0);
     assert(turbo.block_size == 4096);
-    assert(acoustic::bits_per_symbol(turbo.modem) == 4);
+    assert(acoustic::bits_per_symbol(turbo.modem) == 2);
+    assert(turbo_v1.modem.modulation_order == 16);
+    assert(turbo_v1.modem.symbol_rate == 480);
     assert(wideband.modem.symbol_rate == 800);
     assert(wideband.modem.base_frequency + 15.0 * wideband.modem.frequency_spacing == 15000.0);
     assert(fast.modem.modulation_order == 4);

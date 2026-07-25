@@ -30,10 +30,10 @@ UI/CLI → transfer → packet → framing → modem → audio
 
 Цель: перестать оценивать качество только по `decoded/not decoded`.
 
-Статус 0.6.1: этап выполняется. Уже есть `ReceiverMetrics`, JSON для
+Статус 0.7.0: этап выполняется. Уже есть `ReceiverMetrics`, JSON для
 `estimate`/`benchmark`/`channel-test`, goodput/airtime/delivery efficiency,
 исправленные noise/signal windows и начальный channel simulator. Остались
-per-tone response, единый JSON для live/decode, BER/PER и явное управление
+per-tone response, единый JSON для live/decode и явное управление
 diagnostic recordings.
 
 ### Работы
@@ -85,6 +85,10 @@ frame_index | ack_window | payload_length | header_crc/fec
 ## Этап 2. FEC и надёжный half-duplex transport
 
 Цель: повреждение части сигнала не требует повторять весь файл.
+
+Статус 0.7.0: базовый frame-level участок выполнен — есть повторяемый CRC header,
+RS(255,191), interleaving, counters и burst test. Этап не завершён без коротких
+physical frames, soft decisions, ACK/NACK, selective repeat и resume.
 
 ### Работы
 

@@ -26,7 +26,11 @@ struct ReceiverMetrics {
     double estimated_frequency_offset_hz{};
     std::size_t decoded_symbols{};
     std::size_t decoded_bytes{};
+    std::size_t corrected_codewords{};
+    std::size_t corrected_bytes{};
 };
+
+std::size_t protected_frame_payload_bytes(std::size_t payload_size);
 
 std::vector<float> create_audio_frame(std::span<const std::uint8_t> bytes,
                                       const FskConfig& modem = {},

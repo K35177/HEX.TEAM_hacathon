@@ -66,5 +66,28 @@ int main() {
     assert(acoustic::decode_audio_frame(weak_recording, {}, {}, &weak_metrics) == data);
     assert(weak_metrics.chirp_correlation >= 0.08);
     assert(weak_metrics.chirp_correlation < 0.18);
+
+    // A 100 ms dropout used to make the whole transfer unusable. Frame v2
+    // interleaving and RS(255,191) must repair this burst transparently.
+    std::vector<std::uint8_t> protected_data(900);
+    for (std::size_t i = 0; i < protected_data.size(); ++i) {
+        protected_data[i] = static_cast<std::uint8_t>((i * 73U + 19U) & 0xFFU);
+    }
+    auto damaged_frame = acoustic::create_audio_frame(protected_data);
+    const auto symbol_samples = acoustic::samples_per_symbol({});
+    const auto symbols_per_byte = 8U / acoustic::bits_per_symbol({});
+    const auto prefix = static_cast<std::size_t>((0.25 + 0.05) * 48000);
+    const auto fec_body = prefix + (4U + 84U) * symbols_per_byte * symbol_samples;
+    const auto dropout_samples = 20U * symbols_per_byte * symbol_samples;
+    std::fill_n(damaged_frame.begin() + fec_body + 5U * symbols_per_byte * symbol_samples,
+                dropout_samples, 0.0F);
+    std::vector<float> damaged_recording(2400, 0.001F);
+    damaged_recording.insert(damaged_recording.end(), damaged_frame.begin(), damaged_frame.end());
+    damaged_recording.insert(damaged_recording.end(), 2400, 0.0F);
+    acoustic::ReceiverMetrics repaired_metrics;
+    assert(acoustic::decode_audio_frame(damaged_recording, {}, {}, &repaired_metrics) ==
+           protected_data);
+    assert(repaired_metrics.corrected_bytes > 0);
+    assert(repaired_metrics.corrected_codewords > 0);
     std::cout << "framing_tests: OK (chirp found after leading silence)\n";
 }

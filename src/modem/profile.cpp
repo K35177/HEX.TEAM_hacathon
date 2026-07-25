@@ -109,17 +109,31 @@ TransferProfile load_file(const std::filesystem::path& path, TransferProfile pro
 std::vector<TransferProfile> builtin_profiles() {
     TransferProfile turbo;
     turbo.name = "turbo";
-    turbo.description = "1920 bit/s below 8.2 kHz for common speakers and microphones";
-    turbo.modem.symbol_rate = 480;
-    turbo.modem.modulation_order = 16;
-    turbo.modem.base_frequency = 960.0;
-    turbo.modem.frequency_spacing = 480.0;
-    turbo.modem.amplitude = 0.70;
+    turbo.description = "1600 bit/s 4-FSK with FEC for common speakers and microphones";
+    turbo.modem.symbol_rate = 800;
+    turbo.modem.modulation_order = 4;
+    turbo.modem.base_frequency = 1200.0;
+    turbo.modem.frequency_spacing = 1600.0;
+    turbo.modem.amplitude = 0.65;
     turbo.block_size = 4096;
     turbo.frame.chirp_duration_seconds = 0.22;
     turbo.frame.guard_duration_seconds = 0.03;
     turbo.frame.chirp_start_frequency = 700.0;
-    turbo.frame.chirp_end_frequency = 8500.0;
+    turbo.frame.chirp_end_frequency = 6800.0;
+
+    TransferProfile turbo_v1;
+    turbo_v1.name = "turbo-v1";
+    turbo_v1.description = "legacy 0.6.1 decoder for existing 16-FSK recordings";
+    turbo_v1.modem.symbol_rate = 480;
+    turbo_v1.modem.modulation_order = 16;
+    turbo_v1.modem.base_frequency = 960.0;
+    turbo_v1.modem.frequency_spacing = 480.0;
+    turbo_v1.modem.amplitude = 0.70;
+    turbo_v1.block_size = 4096;
+    turbo_v1.frame.chirp_duration_seconds = 0.22;
+    turbo_v1.frame.guard_duration_seconds = 0.03;
+    turbo_v1.frame.chirp_start_frequency = 700.0;
+    turbo_v1.frame.chirp_end_frequency = 8500.0;
 
     TransferProfile wideband;
     wideband.name = "wideband";
@@ -165,7 +179,7 @@ std::vector<TransferProfile> builtin_profiles() {
     robust.frame.chirp_start_frequency = 700.0;
     robust.frame.chirp_end_frequency = 4200.0;
 
-    return {turbo, wideband, fast, balanced, robust};
+    return {turbo, turbo_v1, wideband, fast, balanced, robust};
 }
 
 void validate_profile(const TransferProfile& profile) {

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(acoustic_file_transfer VERSION 0.6.1 LANGUAGES CXX)
+project(acoustic_file_transfer VERSION 0.7.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -14,6 +14,7 @@ add_library(acoustic_core
     src/protocol/crc32.cpp
     src/protocol/packet.cpp
     src/protocol/sha256.cpp
+    src/protocol/fec.cpp
     src/modem/fsk.cpp
     src/modem/framing.cpp
     src/modem/channel_simulator.cpp
@@ -94,6 +95,10 @@ add_executable(profile_tests tests/profile_tests.cpp)
 target_link_libraries(profile_tests PRIVATE acoustic_core)
 add_test(NAME profile_tests COMMAND profile_tests)
 
+add_executable(fec_tests tests/fec_tests.cpp)
+target_link_libraries(fec_tests PRIVATE acoustic_core)
+add_test(NAME fec_tests COMMAND fec_tests)
+
 add_executable(channel_simulator_tests tests/channel_simulator_tests.cpp)
 target_link_libraries(channel_simulator_tests PRIVATE acoustic_core)
 add_test(NAME channel_simulator_tests COMMAND channel_simulator_tests)
@@ -102,7 +107,7 @@ add_test(NAME channel_simulator_tests COMMAND channel_simulator_tests)
 # Release configurations as well.
 set(ACOUSTIC_TEST_TARGETS
     protocol_tests wav_tests fsk_tests transfer_tests framing_tests
-    sha256_tests audio_processing_tests profile_tests channel_simulator_tests)
+    sha256_tests audio_processing_tests profile_tests fec_tests channel_simulator_tests)
 foreach(test_target IN LISTS ACOUSTIC_TEST_TARGETS)
     if(MSVC)
         target_compile_options(${test_target} PRIVATE /UNDEBUG /utf-8)
