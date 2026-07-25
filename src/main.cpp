@@ -1,4 +1,5 @@
 #include "acoustic/audio_device.hpp"
+#include "acoustic/audio_processing.hpp"
 #include "acoustic/crc32.hpp"
 #include "acoustic/fsk.hpp"
 #include "acoustic/framing.hpp"
@@ -12,6 +13,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <exception>
 #include <filesystem>
 #include <fstream>
@@ -22,6 +24,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -39,7 +42,8 @@ void print_help() {
         << "  acoustic-transfer check-audio\n"
         << "  acoustic-transfer self-test\n"
         << "  acoustic-transfer send <input>\n"
-        << "  acoustic-transfer receive <output-dir> [seconds]\n";
+        << "  acoustic-transfer receive <output-dir> [seconds] [gain]\n"
+        << "    gain: 0=auto (default), 1=no boost, 2..50=manual boost\n";
 }
 
 std::string human_size(std::size_t bytes) {
@@ -53,6 +57,39 @@ std::string human_size(std::size_t bytes) {
     std::ostringstream out;
     out << std::fixed << std::setprecision(unit == 0 ? 0 : 1) << value << ' ' << units[unit];
     return out.str();
+}
+
+std::string trim(std::string value) {
+    const auto first = value.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos) return {};
+    const auto last = value.find_last_not_of(" \t\r\n");
+    value = value.substr(first, last - first + 1U);
+    if (value.size() >= 2 && ((value.front() == '"' && value.back() == '"') ||
+                              (value.front() == '\'' && value.back() == '\''))) {
+        value = value.substr(1, value.size() - 2U);
+    }
+    return value;
+}
+
+std::filesystem::path normalize_path(std::string value) {
+    value = trim(std::move(value));
+    if ((value == "~" || value.starts_with("~/"))) {
+        if (const char* home = std::getenv("HOME")) value.replace(0, 1, home);
+    }
+    return value;
+}
+
+std::filesystem::path prompt_input_file() {
+    for (;;) {
+        std::cout << "Путь к файлу (Enter — отмена): " << std::flush;
+        std::string value;
+        if (!std::getline(std::cin, value) || trim(value).empty()) return {};
+        const auto path = normalize_path(std::move(value));
+        std::error_code error;
+        if (std::filesystem::is_regular_file(path, error)) return path;
+        std::cout << "Файл не найден: " << path << "\n"
+                  << "Проверьте имя и регистр букв и попробуйте снова.\n";
+    }
 }
 
 void draw_progress(std::string_view title, unsigned percent) {
@@ -127,8 +164,12 @@ int encode(const std::filesystem::path& input, const std::filesystem::path& outp
     return 0;
 }
 
-int decode(const std::filesystem::path& input, const std::filesystem::path& output) {
-    const auto wav = acoustic::read_wav(input);
+int decode(const std::filesystem::path& input, const std::filesystem::path& output,
+           double requested_gain = 0.0) {
+    auto wav = acoustic::read_wav(input);
+    const auto applied_gain = acoustic::apply_receive_gain(wav.samples, requested_gain);
+    std::cout << "Усиление записи: x" << std::fixed << std::setprecision(2)
+              << applied_gain << (requested_gain == 0.0 ? " (auto)\n" : " (manual)\n");
     acoustic::FskConfig config;
     config.sample_rate = wav.sample_rate;
     const auto stream = acoustic::decode_audio_frame(wav.samples, config);
@@ -148,7 +189,12 @@ int decode(const std::filesystem::path& input, const std::filesystem::path& outp
 }
 
 int send(const std::filesystem::path& input) {
-    const auto file_size = std::filesystem::file_size(input);
+    std::error_code error;
+    if (!std::filesystem::is_regular_file(input, error)) {
+        throw std::runtime_error("файл не найден: " + input.string());
+    }
+    const auto file_size = std::filesystem::file_size(input, error);
+    if (error) throw std::runtime_error("не удалось определить размер файла: " + input.string());
     const auto blocks = std::max<std::uintmax_t>(1, (file_size + acoustic::kDefaultBlockSize - 1) /
                                                        acoustic::kDefaultBlockSize);
     std::cout << "\nПередача: " << input.filename() << "\n"
@@ -158,6 +204,9 @@ int send(const std::filesystem::path& input) {
     encode(input, temporary);
     const auto wav = acoustic::read_wav(temporary);
     const auto duration = wav.samples.size() / static_cast<double>(wav.sample_rate);
+    std::cout << "Длительность сигнала: " << std::fixed << std::setprecision(1)
+              << duration << " с. На приёмнике задайте запись не короче "
+              << static_cast<unsigned>(std::ceil(duration + 10.0)) << " с.\n";
     std::cout << "Держите устройства на расстоянии 0,5–1 м.\n";
     run_with_progress("Передача", duration, [&] { acoustic::play_wav_file(temporary); });
     std::filesystem::remove(temporary);
@@ -165,14 +214,17 @@ int send(const std::filesystem::path& input) {
     return 0;
 }
 
-int receive(const std::filesystem::path& output_directory, unsigned seconds) {
-    if (seconds == 0 || seconds > 300) throw std::invalid_argument("recording duration must be 1..300 seconds");
+int receive(const std::filesystem::path& output_directory, unsigned seconds,
+            double gain = 0.0) {
+    if (seconds == 0 || seconds > 3600) {
+        throw std::invalid_argument("длительность записи должна быть от 1 до 3600 секунд");
+    }
     std::filesystem::create_directories(output_directory);
     const auto temporary = std::filesystem::temp_directory_path() / "acoustic-transfer-receive.wav";
     std::cout << "\nПриём: запись " << seconds << " с. Запустите передатчик сейчас.\n";
     run_with_progress("Запись   ", seconds, [&] { acoustic::record_wav_file(temporary, seconds); });
     std::cout << "Поиск начала передачи и проверка файла...\n";
-    const auto result = decode(temporary, output_directory);
+    const auto result = decode(temporary, output_directory, gain);
     std::filesystem::remove(temporary);
     return result;
 }
@@ -202,10 +254,8 @@ int interactive_menu() {
         if (!std::getline(std::cin, command) || command == "0" || command == "q") return 0;
         try {
             if (command == "1") {
-                std::cout << "Путь к файлу: " << std::flush;
-                std::string path;
-                std::getline(std::cin, path);
-                send(path);
+                const auto path = prompt_input_file();
+                if (!path.empty()) send(path);
             } else if (command == "2") {
                 std::cout << "Папка для сохранения [artifacts/received]: " << std::flush;
                 std::string directory;
@@ -214,7 +264,12 @@ int interactive_menu() {
                 std::cout << "Длительность записи, сек [30]: " << std::flush;
                 std::string duration;
                 std::getline(std::cin, duration);
-                receive(directory, duration.empty() ? 30U : static_cast<unsigned>(std::stoul(duration)));
+                std::cout << "Усиление [auto; число 1–50 для ручного]: " << std::flush;
+                std::string gain;
+                std::getline(std::cin, gain);
+                receive(directory,
+                        duration.empty() ? 30U : static_cast<unsigned>(std::stoul(duration)),
+                        gain.empty() ? 0.0 : std::stod(gain));
             } else if (command == "3") {
                 check_audio_devices();
             } else if (command == "4") {
@@ -255,9 +310,10 @@ int main(int argc, char** argv) {
         if (command == "encode" && argc == 4) return encode(argv[2], argv[3]);
         if (command == "decode" && argc == 4) return decode(argv[2], argv[3]);
         if (command == "send" && argc == 3) return send(argv[2]);
-        if (command == "receive" && (argc == 3 || argc == 4)) {
-            const auto seconds = argc == 4 ? std::stoul(argv[3]) : 30UL;
-            return receive(argv[2], static_cast<unsigned>(seconds));
+        if (command == "receive" && (argc >= 3 && argc <= 5)) {
+            const auto parsed_seconds = argc >= 4 ? std::stoul(argv[3]) : 30UL;
+            const auto gain = argc == 5 ? std::stod(argv[4]) : 0.0;
+            return receive(argv[2], static_cast<unsigned>(parsed_seconds), gain);
         }
         print_help();
         return 1;

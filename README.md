@@ -51,12 +51,19 @@ cmp input.png restored.png
 
 ```bash
 ./build/acoustic-transfer send input.png
-./build/acoustic-transfer receive received/
+./build/acoustic-transfer receive received/ 30
 ```
 
 На Linux команды используют `aplay` и `arecord` из пакета `alsa-utils`.
 Получатель запускается первым; длительность записи можно указать последним
-аргументом, например `receive artifacts/received 15`.
+аргументом. Усиление микрофонной записи работает автоматически. При
+необходимости укажите ручной коэффициент последним аргументом:
+
+```bash
+./build/acoustic-transfer receive artifacts/received 30 4
+```
+
+Здесь `30` — длительность записи в секундах, `4` — усиление в четыре раза.
 
 Архитектура и формат пакетов описаны в [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md),
 известные ограничения — в [docs/LIMITATIONS.md](docs/LIMITATIONS.md).

@@ -9,6 +9,7 @@ find_package(Threads REQUIRED)
 
 add_library(acoustic_core
     src/audio/audio_device.cpp
+    src/audio/audio_processing.cpp
     src/audio/wav.cpp
     src/protocol/crc32.cpp
     src/protocol/packet.cpp
@@ -49,3 +50,7 @@ add_test(NAME framing_tests COMMAND framing_tests)
 add_executable(sha256_tests tests/sha256_tests.cpp)
 target_link_libraries(sha256_tests PRIVATE acoustic_core)
 add_test(NAME sha256_tests COMMAND sha256_tests)
+
+add_executable(audio_processing_tests tests/audio_processing_tests.cpp)
+target_link_libraries(audio_processing_tests PRIVATE acoustic_core)
+add_test(NAME audio_processing_tests COMMAND audio_processing_tests)
