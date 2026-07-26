@@ -46,6 +46,26 @@ int main() {
     for (int i = 0; i < 50; ++i) room_detector.process_pcm16(room_noise);
     assert(room_detector.should_stop());
 
+    // Real audio processing can leave an elevated residual tail after a loud
+    // transfer. It is well above the pre-transfer noise, but more than 26 dB
+    // below the transmission and must still count as silence. A quieter data
+    // section above that relative threshold must remain active.
+    acoustic::SilenceDetector residual_detector(1000, 5.0);
+    const std::vector<std::int16_t> low_noise(100, 7);
+    const std::vector<std::int16_t> loud_signal(100, 2300);
+    const std::vector<std::int16_t> faded_signal(100, 200);
+    const std::vector<std::int16_t> residual_tail(100, 53);
+    for (int i = 0; i < 10; ++i) residual_detector.process_pcm16(low_noise);
+    residual_detector.process_pcm16(loud_signal);
+    residual_detector.process_pcm16(loud_signal);
+    assert(residual_detector.signal_detected());
+    for (int i = 0; i < 60; ++i) residual_detector.process_pcm16(faded_signal);
+    assert(!residual_detector.should_stop());
+    for (int i = 0; i < 49; ++i) residual_detector.process_pcm16(residual_tail);
+    assert(!residual_detector.should_stop());
+    residual_detector.process_pcm16(residual_tail);
+    assert(residual_detector.should_stop());
+
     acoustic::SilenceDetector weak_detector(1000, 5.0);
     const std::vector<std::int16_t> very_quiet_room(100, 2);
     const std::vector<std::int16_t> weak_signal(100, 48);

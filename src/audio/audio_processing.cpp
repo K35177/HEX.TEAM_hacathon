@@ -90,18 +90,26 @@ void SilenceDetector::process_pcm16(std::span<const std::int16_t> samples) {
         const double activation_threshold = std::max(0.001, noise_rms_ * 2.5);
         if (rms > activation_threshold) {
             active_samples_ += samples.size();
+            activation_level_sum_ += rms * samples.size();
             if (active_samples_ >= required_activity_samples_) {
                 signal_detected_ = true;
+                signal_reference_rms_ = activation_level_sum_ / active_samples_;
                 silent_samples_ = 0;
             }
         } else {
             active_samples_ = 0;
+            activation_level_sum_ = 0.0;
             noise_rms_ = noise_rms_ * 0.98 + rms * 0.02;
         }
         return;
     }
 
-    const double activity_threshold = std::max(0.001, noise_rms_ * 2.5);
+    // A speaker/microphone path often leaves a low-level AGC, echo-canceller
+    // or room tail above the noise measured before transmission. Treat a
+    // sustained level below -26 dB of the acquired signal as silence. The
+    // absolute floor preserves detection of genuinely weak transmissions.
+    const double activity_threshold = std::max(
+        {0.001, noise_rms_ * 2.5, signal_reference_rms_ * 0.05});
     if (rms < activity_threshold) {
         silent_samples_ += samples.size();
         resumed_activity_samples_ = 0;

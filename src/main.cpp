@@ -55,7 +55,7 @@ int self_test(const acoustic::TransferProfile& profile);
 
 void print_help() {
     std::cout
-        << "Acoustic File Transfer 0.7.1\n\n"
+        << "Acoustic File Transfer 0.7.2\n\n"
         << "Использование:\n"
         << "  acoustic-transfer                         # интерактивное меню\n"
         << "  acoustic-transfer menu\n"

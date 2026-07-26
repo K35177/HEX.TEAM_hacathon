@@ -32,6 +32,8 @@ private:
     std::size_t silent_samples_{};
     std::size_t resumed_activity_samples_{};
     double noise_rms_ = 0.003;
+    double activation_level_sum_{};
+    double signal_reference_rms_{};
     bool signal_detected_{};
     bool should_stop_{};
 };

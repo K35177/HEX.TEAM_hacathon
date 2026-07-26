@@ -22,7 +22,7 @@ SHA-256/file      ← packet assembly ← frame detection ← FSK ← microphone
 
 ## Текущая операционная модель
 
-Версия 0.7.1 работает как half-duplex one-shot transfer:
+Версия 0.7.2 работает как half-duplex one-shot transfer:
 
 1. профиль задаётся sender; receiver сначала пробует выбранный, затем остальные;
 2. sender формирует весь transfer stream и один WAV;
